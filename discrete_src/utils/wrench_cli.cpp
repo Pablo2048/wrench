@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2025 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -23,7 +23,7 @@ SOFTWARE.
 *******************************************************************************/
 
 #define STR_FILE_OPERATIONS
-#include <wrench.h>
+#include "wrench.h"
 
 #include "utils/simple_args.h"
 
@@ -45,7 +45,27 @@ void testTimeSlices();
 void testScheduler();
 void testStackOverflow();
 void testYield2();
+void testHostSeededGlobalValue( WRState* w );
+void testBlankHostSeededGlobals( WRState* w );
 void testD();
+void testCallFunctionHashLibraryFallback();
+void testFunctionNameHashAsArgument();
+void testNamedEnumUnqualifiedError();
+void testBlankVariablesCannotBeInitialized();
+void testFunctionNotFoundErrors();
+void testLibFunctionNotFoundErrors();
+void testOnCallbackNotFound();
+void testOnLibCallbackNotFound();
+void testDropClobberedInitializerStores();
+void testDeepHashTableWithWrenchValue();
+void testStateContextOpaquePointer();
+#ifndef WRENCH_WITHOUT_COMPILER
+void testCompilerArrayCopiesAndRemoval();
+#endif
+#ifdef WRENCH_HANDLE_MALLOC_FAIL
+void testArrayMallocFailureHandling();
+bool wr_arrayInsertEx( WRValue* A, const unsigned int where, const unsigned int count, WRValue* stackTop, WRContext* c );
+#endif
 void LEAKtest();
 void C3test();
 #ifdef WIN32_C17
@@ -84,6 +104,176 @@ void devFree(void* ptr)
 		free(m);
 	}
 }
+
+#ifdef WRENCH_HANDLE_MALLOC_FAIL
+int g_allocationsBeforeFailure = -1;
+int g_failAllocatorCalls = 0;
+int g_zeroByteAllocatorCalls = 0;
+
+//------------------------------------------------------------------------------
+void* failAfterNAlloc( size_t size )
+{
+	++g_failAllocatorCalls;
+
+	if ( g_allocationsBeforeFailure == 0 )
+	{
+		return 0;
+	}
+
+	if ( g_allocationsBeforeFailure > 0 )
+	{
+		--g_allocationsBeforeFailure;
+	}
+
+	return malloc( size );
+}
+
+//------------------------------------------------------------------------------
+void failAfterNFree( void* ptr )
+{
+	free( ptr );
+}
+
+//------------------------------------------------------------------------------
+void* rejectZeroByteAlloc( size_t size )
+{
+	if ( !size )
+	{
+		++g_zeroByteAllocatorCalls;
+		return 0;
+	}
+
+	return malloc( size );
+}
+
+//------------------------------------------------------------------------------
+void testArrayMallocFailureHandling()
+{
+	WRContext* context = (WRContext*)malloc( sizeof(WRContext) );
+	memset( (unsigned char*)context, 0, sizeof(WRContext) );
+
+	wr_setGlobalAllocator( failAfterNAlloc, failAfterNFree );
+	g_allocationsBeforeFailure = 1;
+	g_mallocFailed = false;
+
+	assert( !context->getSVA(1, SV_VALUE, true) );
+	assert( !context->svAllocated );
+	assert( g_mallocFailed );
+
+	g_allocationsBeforeFailure = -1;
+	g_failAllocatorCalls = 0;
+	assert( !context->getSVA(0, SV_HASH_TABLE, false) );
+	assert( !g_failAllocatorCalls );
+
+	wr_setGlobalAllocator( rejectZeroByteAlloc, failAfterNFree );
+	g_zeroByteAllocatorCalls = 0;
+	g_mallocFailed = false;
+
+	WRGCObject* emptyString = context->getSVA(0, SV_CHAR, false);
+	assert( emptyString );
+	assert( emptyString->m_size == 0 );
+	assert( emptyString->m_Cdata );
+
+	WRGCObject* emptyArray = context->getSVA(0, SV_VALUE, true);
+	assert( emptyArray );
+	assert( emptyArray->m_size == 0 );
+	assert( emptyArray->m_Vdata );
+	assert( !g_zeroByteAllocatorCalls );
+	assert( !g_mallocFailed );
+
+	while ( context->svAllocated )
+	{
+		WRGCBase* allocated = context->svAllocated;
+		context->svAllocated = allocated->m_nextGC;
+		allocated->clear();
+		g_free( allocated );
+	}
+
+	wr_setGlobalAllocator( &malloc, &free );
+	g_mallocFailed = false;
+
+	WRGCObject* va = (WRGCObject*)malloc( sizeof(WRGCObject) );
+	memset( (unsigned char*)va, 0, sizeof(WRGCObject) );
+	assert( va->init(2, SV_VALUE, true) == (int)(2 * sizeof(WRValue)) );
+
+	WRValue array;
+	array.p2 = INIT_AS_ARRAY;
+	array.va = va;
+
+	WRValue index;
+	index.init( 4 );
+
+	WRValue target;
+	target.init( 123 );
+
+	unsigned char* old = va->m_Cdata;
+
+	wr_setGlobalAllocator( failAfterNAlloc, failAfterNFree );
+	g_allocationsBeforeFailure = 0;
+
+	wr_index[(WR_INT << 2) | WR_EX]( context, &index, &array, &target );
+	assert( g_mallocFailed );
+	assert( va->m_Cdata == old );
+	assert( va->m_size == 2 );
+	assert( target.asInt() == 0 );
+
+	g_mallocFailed = false;
+	assert( !array.indexArray(context, 5, true) );
+	assert( g_mallocFailed );
+	assert( va->m_Cdata == old );
+	assert( va->m_size == 2 );
+
+	WRValue stackTop;
+	stackTop.init();
+
+	g_mallocFailed = false;
+	assert( !wr_arrayInsertEx(&array, 1, 1, &stackTop, context) );
+	assert( g_mallocFailed );
+	assert( va->m_Cdata == old );
+	assert( va->m_size == 2 );
+
+	wr_setGlobalAllocator( &malloc, &free );
+	g_mallocFailed = false;
+	va->clear();
+	free( va );
+	free( context );
+}
+#endif
+
+//------------------------------------------------------------------------------
+#ifndef WRENCH_WITHOUT_COMPILER
+void testCompilerArrayCopiesAndRemoval()
+{
+	WRarray<int> source;
+	source.append() = 10;
+	source.append() = 20;
+	source.append() = 30;
+	source.pop();
+
+	WRarray<int> copied( source );
+	assert( copied.count() == 2 );
+	assert( copied[0] == 10 );
+	assert( copied[1] == 20 );
+
+	WRarray<int> assigned;
+	assigned = source;
+	assert( assigned.count() == 2 );
+	assert( assigned[0] == 10 );
+	assert( assigned[1] == 20 );
+
+	WRarray<int> values;
+	values.append() = 10;
+	values.append() = 20;
+	values.append() = 30;
+	values.append() = 40;
+
+	assert( values.remove(2, 100) == 2 );
+	assert( values[0] == 10 );
+	assert( values[1] == 20 );
+	assert( values.remove(1, 0) == 2 );
+	assert( values.remove(0, 100) == 0 );
+}
+#endif
 
 //------------------------------------------------------------------------------
 void blobToHeader( WRstr const& blob, WRstr const& variableName, WRstr& header )
@@ -151,10 +341,8 @@ const char* sourceOrder[]=
 	"/utils/serializer.h",
 	"/utils/simple_ll.h",
 	"/utils/simple_args.h",
-	"/vm/gc_object.h",
 	"/vm/vm.h",
 	"/utils/opcode.h",
-	"/cc/str.h",
 	"/cc/opcode_stream.h",
 	"/cc/cc.h",
 	"/debug/packet.h",
@@ -227,6 +415,7 @@ int usage()
 			"                               const int [name]_bytecodeSize;\n"
 			
 			"p [infile]                     print disassembly of file\n"
+			"d [bytecode file]              decode/disassemble bytecode file\n"
 /*
 			"ca [infile] [out file] [name]  compile infile and output as an inc file\n"
 			"                               for assembly of name \"out file\"\n"
@@ -236,7 +425,7 @@ int usage()
 */
 			"\n"
 #ifdef WRENCH_INCLUDE_DEBUG_CODE
-			"d"
+			"dbg [file]                     debugger client entry\n"
 			"\n"
 #endif
 			"t                              run internal tests\n"
@@ -318,8 +507,9 @@ int main( int argn, char* argv[] )
 
 	if ( SimpleArgs::get(argn, argv, "t") )
 	{
-		runTests( (argn >= 3) ? atoi(argv[2]) : 0 );
+		int err = runTests( (argn >= 3) ? atoi(argv[2]) : 0 );
 		printf("\n");
+		return err;
 	}
 	else if ( SimpleArgs::get(argn, argv, "p") )
 	{
@@ -346,10 +536,24 @@ int main( int argn, char* argv[] )
 		wr_disassemble( out, outLen, &listing );
 		printf("%s\n", listing );
 		wr_free( listing );
-		
+	}
+	else if ( SimpleArgs::get(argn, argv, "d") )
+	{
+		const char* filename = SimpleArgs::get(argn, argv, -1);
+		WRstr bytes;
+		if ( !bytes.fileToBuffer(filename) )
+		{
+			printf( "Could not open bytecode file [%s]\n", filename );
+			return usage();
+		}
+
+		char* listing = 0;
+		wr_disassemble( (const uint8_t*)bytes.c_str(), bytes.size(), &listing );
+		printf( "%s\n", listing );
+		wr_free( listing );
 	}
 #ifdef WRENCH_INCLUDE_DEBUG_CODE
-	else if ( SimpleArgs::get(argn, argv, "d") )
+	else if ( SimpleArgs::get(argn, argv, "dbg") )
 	{
 		WrenchDebugClient client;
 		int port = 0;
@@ -360,7 +564,7 @@ int main( int argn, char* argv[] )
 		}
 		address[0] = 0;
 		SimpleArgs::get(argn, argv, "-address", address, 64);
-
+		
 		client.enter( SimpleArgs::get(argn, argv, -1), address, port );
 	}
 #endif
@@ -540,7 +744,12 @@ int main( int argn, char* argv[] )
 		version.format( "%d.%d.%d", WRENCH_VERSION_MAJOR, WRENCH_VERSION_MINOR, WRENCH_VERSION_BUILD );
 		version.bufferToFile( "version.txt" );
 
-		WRstr out = "#include \"wrench.h\"\n";
+		WRstr out = "#ifdef _MSC_VER\n"
+					"#pragma warning(push)\n"
+					"#pragma warning(disable:4201)\n"
+					"#pragma warning(disable:4996)\n"
+					"#endif\n"
+					"#include \"wrench.h\"\n";
 		WRstr name;		
 		WRstr read;
 		for( int s=0; sourceOrder[s][0]; ++s )
@@ -555,6 +764,10 @@ int main( int argn, char* argv[] )
 			out += read;
 		}
 
+		out += "#ifdef _MSC_VER\n"
+			   "#pragma warning(pop)\n"
+			   "#endif\n";
+
 		name = SimpleArgs::get(argn, argv, -1);
 		name += "/wrench.cpp";
 		out.bufferToFile( name );
@@ -568,6 +781,8 @@ int main( int argn, char* argv[] )
 		}
 		out = "#define WRENCH_COMBINED\n";
 		out += read;
+
+	
 		name = SimpleArgs::get(argn, argv, -1);
 		name += "/wrench.h";
 		out.bufferToFile( name );
@@ -604,6 +819,27 @@ void emitln( WRContext* c, const WRValue* argv, const int argn, WRValue& retVal,
 
 	retVal.i = 20; // for argument-return testing
 }
+
+#ifdef WRENCH_TIME_SLICES
+//------------------------------------------------------------------------------
+int countStringHits( const WRstr& haystack, const char* needle )
+{
+	int count = 0;
+	const int needleLen = (int)strlen( needle );
+	if ( needleLen <= 0 )
+	{
+		return 0;
+	}
+
+	const char* p = haystack.c_str();
+	while( (p = strstr( p, needle )) )
+	{
+		++count;
+		p += needleLen;
+	}
+	return count;
+}
+#endif
 
 //------------------------------------------------------------------------------
 void checkIsRawArray( WRContext* c, const WRValue* argv, const int argn, WRValue& retVal, void* usr )
@@ -718,6 +954,843 @@ void testStructs()
 	wr_destroyState( w );
 	wr_free( outBytes );
 }
+
+//------------------------------------------------------------------------------
+static void hashLibSum2( WRValue* stackTop, const int argn, WRContext* context )
+{
+	(void)context;
+	if ( argn != 2 )
+	{
+		stackTop->init();
+		return;
+	}
+
+	wr_makeInt( stackTop, (stackTop - 2)->asInt() + (stackTop - 1)->asInt() );
+}
+
+//------------------------------------------------------------------------------
+static void hashLibFail( WRValue* stackTop, const int argn, WRContext* context )
+{
+	(void)stackTop;
+	(void)argn;
+	context->w->err = WR_ERR_division_by_zero;
+}
+
+static int32_t g_lastCallbackHashArg = 0;
+static int g_seenCallbackHashArg = 0;
+static int g_blankSeedCallbackSeen = 0;
+static int g_blankSeedCallbackOk = 0;
+static uint32_t g_missingCallbackValueHash = 0;
+static uint32_t g_missingCallbackPopHash = 0;
+static int g_missingCallbackValueSeen = 0;
+static int g_missingCallbackPopSeen = 0;
+static uint32_t g_missingLibValueHash = 0;
+static uint32_t g_missingLibPopHash = 0;
+static int g_missingLibValueSeen = 0;
+static int g_missingLibPopSeen = 0;
+
+//------------------------------------------------------------------------------
+static void captureHashArg( WRContext* c, const WRValue* argv, const int argn, WRValue& retVal, void* usr )
+{
+	(void)c;
+	(void)usr;
+	retVal.init();
+	if ( argn > 0 )
+	{
+		g_lastCallbackHashArg = argv[0].asInt();
+		g_seenCallbackHashArg = 1;
+	}
+}
+
+//------------------------------------------------------------------------------
+static void checkBlankSeededGlobals( WRContext* c, const WRValue* argv, const int argn, WRValue& retVal, void* usr )
+{
+	(void)c;
+	(void)usr;
+	retVal.init();
+	g_blankSeedCallbackSeen = 1;
+	g_blankSeedCallbackOk = (argn == 3)
+		&& (argv[0].asInt() == 101)
+		&& (argv[1].asInt() == 202)
+		&& (argv[2].asInt() == 303);
+}
+
+//------------------------------------------------------------------------------
+static void onMissingCallback( const uint32_t signature, WRContext* c, const WRValue* argv, const int argn, WRValue& retVal, void* usr )
+{
+	(void)c;
+	(void)usr;
+
+	if ( signature == g_missingCallbackValueHash )
+	{
+		assert( argn == 2 );
+		assert( argv[0].asInt() == 7 );
+		assert( argv[1].asInt() == 8 );
+		wr_makeInt( &retVal, 42 );
+		g_missingCallbackValueSeen = 1;
+		return;
+	}
+
+	if ( signature == g_missingCallbackPopHash )
+	{
+		assert( argn == 1 );
+		assert( argv[0].asInt() == 9 );
+		retVal.init();
+		g_missingCallbackPopSeen = 1;
+		return;
+	}
+
+	assert( 0 );
+}
+
+//------------------------------------------------------------------------------
+static void onMissingLibCallback( const uint32_t signature, WRValue* stackTop, const int argn, WRContext* context )
+{
+	(void)context;
+
+	if ( signature == g_missingLibValueHash )
+	{
+		assert( argn == 2 );
+		assert( (stackTop - 2)->asInt() == 4 );
+		assert( (stackTop - 1)->asInt() == 6 );
+		wr_makeInt( stackTop, 55 );
+		g_missingLibValueSeen = 1;
+		return;
+	}
+
+	if ( signature == g_missingLibPopHash )
+	{
+		assert( argn == 1 );
+		assert( (stackTop - 1)->asInt() == 11 );
+		g_missingLibPopSeen = 1;
+		return;
+	}
+
+	assert( 0 );
+}
+
+//------------------------------------------------------------------------------
+struct OpaqueStateContext
+{
+	int magic;
+	int writes;
+};
+
+//------------------------------------------------------------------------------
+static void ctxReadMagic( WRContext* c, const WRValue* argv, const int argn, WRValue& retVal, void* usr )
+{
+	(void)argv;
+	(void)argn;
+	(void)usr;
+	OpaqueStateContext* data = (OpaqueStateContext*)c->w->ctx;
+	if ( !data )
+	{
+		retVal.init();
+		return;
+	}
+	wr_makeInt( &retVal, data->magic );
+}
+
+//------------------------------------------------------------------------------
+static void ctxAccumulate( WRContext* c, const WRValue* argv, const int argn, WRValue& retVal, void* usr )
+{
+	(void)usr;
+	OpaqueStateContext* data = (OpaqueStateContext*)c->w->ctx;
+	if ( !data )
+	{
+		retVal.init();
+		return;
+	}
+
+	int add = (argn > 0) ? argv[0].asInt() : 1;
+	data->writes += add;
+	wr_makeInt( &retVal, data->writes );
+}
+
+//------------------------------------------------------------------------------
+void testCallFunctionHashLibraryFallback()
+{
+	WRState* w = wr_newState( 64 );
+	if ( !w )
+	{
+		assert(0);
+		return;
+	}
+	wr_registerLibraryFunction( w, "lib::sum2", hashLibSum2 );
+	wr_registerLibraryFunction( w, "lib::fail", hashLibFail );
+
+	unsigned char* out = 0;
+	int outLen = 0;
+	if ( wr_compile( "", 0, &out, &outLen, 0, WR_INCLUDE_GLOBALS ) != WR_ERR_None )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	WRContext* c = wr_run( w, out, outLen, true );
+	if ( !c )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	WRValue args[2];
+	wr_makeInt( &args[0], 7 );
+	wr_makeInt( &args[1], 11 );
+
+	WRValue* r = wr_callFunction( c, wr_hashStr("lib::sum2"), args, 2 );
+	if ( !r || r->asInt() != 18 || wr_getLastError( w ) != WR_ERR_None )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	WRValue* errRet = wr_callFunction( c, wr_hashStr("lib::fail"), 0, 0 );
+	if ( errRet || wr_getLastError( w ) != WR_ERR_division_by_zero )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	// Verify stale error from previous call does not leak into success path.
+	WRValue* r2 = wr_callFunction( c, wr_hashStr("lib::sum2"), args, 2 );
+	if ( !r2 || r2->asInt() != 18 || wr_getLastError( w ) != WR_ERR_None )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	wr_destroyState( w );
+}
+
+//------------------------------------------------------------------------------
+void testFunctionNameHashAsArgument()
+{
+	WRState* w = wr_newState( 64 );
+	if ( !w )
+	{
+		assert(0);
+		return;
+	}
+
+	g_lastCallbackHashArg = 0;
+	g_seenCallbackHashArg = 0;
+	wr_registerFunction( w, "print", captureHashArg );
+
+	const char* src =
+		"print( fname );\n"
+		"function fname() { }\n";
+
+	unsigned char* out = 0;
+	int outLen = 0;
+	WRstr errMsg;
+	if ( wr_compile(src, (int)strlen(src), &out, &outLen, &errMsg, WR_INCLUDE_GLOBALS) != WR_ERR_None )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	WRContext* c = wr_run( w, out, outLen, true );
+	if ( !c || wr_getLastError( w ) != WR_ERR_None )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	const int32_t expected = (int32_t)wr_hashStr( "fname" );
+	if ( !g_seenCallbackHashArg || g_lastCallbackHashArg != expected )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	wr_destroyState( w );
+}
+
+//------------------------------------------------------------------------------
+// Confirm that a named-enum member used WITHOUT its namespace qualifier is a
+// compile error (WR_ERR_var_not_seen_before_label), not a silent hash literal.
+// This guards against regression of the bug where println(RED) would compile
+// and output wr_hashStr("RED") instead of failing.
+void testNamedEnumUnqualifiedError()
+{
+	printf( "test [-][named enum member without qualifier is a compile error]:\n" );
+	printf( "     (the compile error below is expected)\n" );
+
+	// A script that declares a named enum then uses the bare member name.
+	// The bare 'RED' must not be accepted as a function-hash literal.
+	const char* src = "enum Color { RED, GREEN, BLUE }\n"
+					  "println( RED );\n";
+
+	unsigned char* out = 0;
+	int outLen = 0;
+	WRError result = wr_compile( src, (int)strlen(src), &out, &outLen, 0, WR_INCLUDE_GLOBALS );
+	free( out );
+
+	assert( result == WR_ERR_var_not_seen_before_label );
+	if ( result != WR_ERR_var_not_seen_before_label )
+	{
+		printf( "WR_ERR_var_not_seen_before_label expected but NOT EMITTED\n" );
+	}
+}
+
+//------------------------------------------------------------------------------
+void testBlankVariablesCannotBeInitialized()
+{
+	printf( "test [-][blank variables cannot be initialized]:\n" );
+	printf( "     (the compile errors below are expected)\n" );
+
+	const char* src[] =
+	{
+		"blank X = 1;\n",
+		"blank var X = 1;\n",
+		"var blank X = 1;\n",
+		0
+	};
+
+	for( int i=0; src[i]; ++i )
+	{
+		unsigned char* out = 0;
+		int outLen = 0;
+		WRError result = wr_compile( src[i], (int)strlen(src[i]), &out, &outLen, 0, WR_INCLUDE_GLOBALS );
+		free( out );
+
+		assert( result == WR_ERR_blank_variables_cannot_be_initialized );
+		if ( result != WR_ERR_blank_variables_cannot_be_initialized )
+		{
+			printf( "WR_ERR_blank_variables_cannot_be_initialized expected but NOT EMITTED\n" );
+		}
+	}
+}
+
+//------------------------------------------------------------------------------
+void testFunctionNotFoundErrors()
+{
+	printf( "test [-][missing functions set WR_ERR_function_not_found]:\n" );
+
+	{
+		WRState* w = wr_newState( 64 );
+		if ( !w )
+		{
+			assert(0);
+			return;
+		}
+
+		const char* src = "missingPop(9);\n";
+		unsigned char* out = 0;
+		int outLen = 0;
+		if ( wr_compile( src, (int)strlen(src), &out, &outLen, 0, WR_INCLUDE_GLOBALS ) != WR_ERR_None )
+		{
+			assert(0);
+			wr_destroyState( w );
+			return;
+		}
+
+		WRContext* c = wr_run( w, out, outLen, true );
+		if ( c || wr_getLastError( w ) != WR_ERR_function_not_found )
+		{
+			assert(0);
+			wr_destroyState( w );
+			return;
+		}
+
+		wr_destroyState( w );
+	}
+
+	{
+		WRState* w = wr_newState( 64 );
+		if ( !w )
+		{
+			assert(0);
+			return;
+		}
+
+		const char* src = "function run() { return missingValue(7, 8); }\n";
+		unsigned char* out = 0;
+		int outLen = 0;
+		if ( wr_compile( src, (int)strlen(src), &out, &outLen, 0, WR_INCLUDE_GLOBALS ) != WR_ERR_None )
+		{
+			assert(0);
+			wr_destroyState( w );
+			return;
+		}
+
+		WRContext* c = wr_run( w, out, outLen, true );
+		if ( !c || wr_getLastError( w ) != WR_ERR_None )
+		{
+			assert(0);
+			wr_destroyState( w );
+			return;
+		}
+
+		WRValue* r = wr_callFunction( c, "run" );
+		if ( r || wr_getLastError( w ) != WR_ERR_function_not_found )
+		{
+			assert(0);
+			wr_destroyState( w );
+			return;
+		}
+
+		wr_destroyState( w );
+	}
+}
+
+//------------------------------------------------------------------------------
+void testLibFunctionNotFoundErrors()
+{
+	printf( "test [-][missing library functions set WR_ERR_lib_function_not_found]:\n" );
+
+	{
+		WRState* w = wr_newState( 64 );
+		if ( !w )
+		{
+			assert(0);
+			return;
+		}
+
+		const char* src = "libmissing::pop(11);\n";
+		unsigned char* out = 0;
+		int outLen = 0;
+		if ( wr_compile( src, (int)strlen(src), &out, &outLen, 0, WR_INCLUDE_GLOBALS ) != WR_ERR_None )
+		{
+			assert(0);
+			wr_destroyState( w );
+			return;
+		}
+
+		WRContext* c = wr_run( w, out, outLen, true );
+		if ( c || wr_getLastError( w ) != WR_ERR_lib_function_not_found )
+		{
+			assert(0);
+			wr_destroyState( w );
+			return;
+		}
+
+		wr_destroyState( w );
+	}
+
+	{
+		WRState* w = wr_newState( 64 );
+		if ( !w )
+		{
+			assert(0);
+			return;
+		}
+
+		const char* src = "function run() { return libmissing::value(4, 6); }\n";
+		unsigned char* out = 0;
+		int outLen = 0;
+		if ( wr_compile( src, (int)strlen(src), &out, &outLen, 0, WR_INCLUDE_GLOBALS ) != WR_ERR_None )
+		{
+			assert(0);
+			wr_destroyState( w );
+			return;
+		}
+
+		WRContext* c = wr_run( w, out, outLen, true );
+		if ( !c || wr_getLastError( w ) != WR_ERR_None )
+		{
+			assert(0);
+			wr_destroyState( w );
+			return;
+		}
+
+		WRValue* r = wr_callFunction( c, "run" );
+		if ( r || wr_getLastError( w ) != WR_ERR_lib_function_not_found )
+		{
+			assert(0);
+			wr_destroyState( w );
+			return;
+		}
+
+		wr_destroyState( w );
+	}
+}
+
+//------------------------------------------------------------------------------
+void testOnCallbackNotFound()
+{
+	printf( "test [-][onCallbackNotFound handles missing functions]:\n" );
+
+	WRState* w = wr_newState( 64 );
+	if ( !w )
+	{
+		assert(0);
+		return;
+	}
+
+	g_missingCallbackValueHash = wr_hashStr( "missingValue" );
+	g_missingCallbackPopHash = wr_hashStr( "missingPop" );
+	g_missingCallbackValueSeen = 0;
+	g_missingCallbackPopSeen = 0;
+	wr_setOnCallbackNotFound( w, onMissingCallback );
+
+	const char* src =
+		"missingPop(9);\n"
+		"function run() { return missingValue(7, 8); }\n";
+
+	unsigned char* out = 0;
+	int outLen = 0;
+	if ( wr_compile( src, (int)strlen(src), &out, &outLen, 0, WR_INCLUDE_GLOBALS ) != WR_ERR_None )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	WRContext* c = wr_run( w, out, outLen, true );
+	if ( !c || wr_getLastError( w ) != WR_ERR_None || !g_missingCallbackPopSeen )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	WRValue* r = wr_callFunction( c, "run" );
+	if ( !r || r->asInt() != 42 || wr_getLastError( w ) != WR_ERR_None || !g_missingCallbackValueSeen )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	wr_destroyState( w );
+}
+
+//------------------------------------------------------------------------------
+void testOnLibCallbackNotFound()
+{
+	printf( "test [-][onLibCallbackNotFound handles missing library functions]:\n" );
+
+	WRState* w = wr_newState( 64 );
+	if ( !w )
+	{
+		assert(0);
+		return;
+	}
+
+	g_missingLibValueHash = wr_hashStr( "libmissing::value" );
+	g_missingLibPopHash = wr_hashStr( "libmissing::pop" );
+	g_missingLibValueSeen = 0;
+	g_missingLibPopSeen = 0;
+	wr_setOnLibCallbackNotFound( w, onMissingLibCallback );
+
+	const char* src =
+		"libmissing::pop(11);\n"
+		"function run() { return libmissing::value(4, 6); }\n";
+
+	unsigned char* out = 0;
+	int outLen = 0;
+	if ( wr_compile( src, (int)strlen(src), &out, &outLen, 0, WR_INCLUDE_GLOBALS ) != WR_ERR_None )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	WRContext* c = wr_run( w, out, outLen, true );
+	if ( !c || wr_getLastError( w ) != WR_ERR_None || !g_missingLibPopSeen )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	WRValue* r = wr_callFunction( c, "run" );
+	if ( !r || r->asInt() != 55 || wr_getLastError( w ) != WR_ERR_None || !g_missingLibValueSeen )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	wr_destroyState( w );
+}
+
+//------------------------------------------------------------------------------
+void testDropClobberedInitializerStores()
+{
+	printf( "test [-][drop initializer immediately clobbered by assign]:\n" );
+
+	const char* src = "var g = 1; g = 2;\n"
+					  "var gh = \"head\";\n"
+					  "function f() { var a = 1; a = 2; return a + g; }\n"
+					  "function s(tail) { var h = gh + tail; h = \"head\"; h += tail; return h; }\n"
+					  "function compareNumber(q) { q = 3; q = 4 < q; return q; }\n"
+					  "function compareEmpty(text) { text = \"\"; text = \"\" == text; return text; }\n"
+					  "function multiply(v) { v = 10; v = v * 2; return v; }\n"
+					  "function branch(v) { if (v > 127) { v = 255 - v; } v = v * 2; return v; }\n";
+
+	unsigned char* out = 0;
+	int outLen = 0;
+	WRError result = wr_compile( src, (int)strlen(src), &out, &outLen, 0, WR_INCLUDE_GLOBALS );
+	if ( result != WR_ERR_None )
+	{
+		assert(0);
+		return;
+	}
+
+	WRstr listing;
+	wr_disassemble( out, outLen, listing );
+	assert( listing.find( "LiteralInt8ToGlobal            g[0x00] imm=0x01" ) == WRstr::npos );
+	assert( listing.find( "LiteralInt8ToLocal             l[0x00] imm=0x01" ) == WRstr::npos );
+	assert( listing.find( "LiteralInt8ToGlobal            g[0x00] imm=0x02" ) != WRstr::npos );
+	assert( listing.find( "LiteralInt8ToLocal             l[0x00] imm=0x02" ) != WRstr::npos );
+
+	WRState* w = wr_newState();
+	WRContext* context = wr_run( w, out, outLen, true );
+	if ( !context )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	WRValue* ret = wr_callFunction( context, "f" );
+	if ( !ret || ret->asInt() != 4 )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	WRValue arg;
+	wr_makeString( context, &arg, "tail", 4 );
+	ret = wr_callFunction( context, "s", &arg, 1 );
+	char tailBuf[32];
+	if ( !ret || WRstr(ret->asString(tailBuf, sizeof(tailBuf))) != "headtail" )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	arg.init( 100 );
+	ret = wr_callFunction( context, "compareNumber", &arg, 1 );
+	if ( !ret || ret->asInt() != 0 )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	wr_makeString( context, &arg, "occupied", 8 );
+	ret = wr_callFunction( context, "compareEmpty", &arg, 1 );
+	if ( !ret || ret->asInt() != 1 )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	arg.init( 0 );
+	ret = wr_callFunction( context, "multiply", &arg, 1 );
+	if ( !ret || ret->asInt() != 20 )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	arg.init( 128 );
+	ret = wr_callFunction( context, "branch", &arg, 1 );
+	if ( !ret || ret->asInt() != 254 )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	wr_destroyState( w );
+}
+
+//------------------------------------------------------------------------------
+void testDeepHashTableWithWrenchValue()
+{
+	WRState* w = wr_newState();
+
+	const char* src = "var root;\n"
+					  "function readDeep() { return root.a.b.c.d; }\n";
+
+	unsigned char* out = 0;
+	int outLen = 0;
+	if ( wr_compile(src, (int)strlen(src), &out, &outLen) != WR_ERR_None )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	WRContext* c = wr_run( w, out, outLen, true );
+	if ( !c || wr_getLastError( w ) != WR_ERR_None )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	// Build root["a"]["b"]["c"]["d"] from C++ side using WrenchValue helper.
+	WrenchValue root( c, "root" );
+	assert( root.isValid() );
+	root.addHashTableValue( "a" );
+
+	WRValue* a = root.getHashTableValue( "a" );
+	assert( a );
+	WrenchValue aRef( c, a );
+	aRef.addHashTableValue( "b" );
+
+	WRValue* b = aRef.getHashTableValue( "b" );
+	assert( b );
+	WrenchValue bRef( c, b );
+	WRValue* c3 = bRef.addHashTableValue( "c" );
+
+	assert( c3 );
+	WrenchValue cRef( c, c3 );
+	cRef.addHashTableValue( "d" );
+
+	WRValue* d = cRef.getHashTableValue( "d" );
+	assert( d );
+	WrenchValue dRef( c, d );
+	*dRef.Int() = 4242;
+
+	WRValue* r = wr_callFunction( c, "readDeep" );
+	if ( !r || r->asInt() != 4242 || wr_getLastError( w ) != WR_ERR_None )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	wr_destroyState( w );
+}
+
+//------------------------------------------------------------------------------
+void testStateContextOpaquePointer()
+{
+	WRState* w = wr_newState( 64 );
+	if ( !w )
+	{
+		assert(0);
+		return;
+	}
+
+	wr_registerFunction( w, "ctxReadMagic", ctxReadMagic );
+	wr_registerFunction( w, "ctxAccumulate", ctxAccumulate );
+
+	const char* mainScript = "function readMagic() { return ctxReadMagic(); }\n"
+							 "function addToState(v) { return ctxAccumulate(v); }\n";
+
+	const char* importScript = "function importedReadMagic() { return ctxReadMagic(); }\n";
+
+	unsigned char* mainOut = 0;
+	unsigned char* importOut = 0;
+	int mainLen = 0;
+	int importLen = 0;
+	if ( wr_compile(mainScript, (int)strlen(mainScript), &mainOut, &mainLen) != WR_ERR_None )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+	
+	if ( wr_compile(importScript, (int)strlen(importScript), &importOut, &importLen) != WR_ERR_None )
+	{
+		assert(0);
+		wr_free( mainOut );
+		wr_destroyState( w );
+		return;
+	}
+
+	OpaqueStateContext first = { 111, 0 };
+	wr_setStateContext( w, &first );
+
+	WRContext* mainCtx = wr_run( w, mainOut, mainLen, true );
+	if ( !mainCtx )
+	{
+		assert(0);
+		wr_free( importOut );
+		wr_destroyState( w );
+		return;
+	}
+
+	WRValue* r = wr_callFunction( mainCtx, "readMagic" );
+	if ( !r || r->asInt() != 111 )
+	{
+		assert(0);
+		wr_free( importOut );
+		wr_destroyState( w );
+		return;
+	}
+
+	WRValue addArg;
+	wr_makeInt( &addArg, 7 );
+	WRValue* addRes = wr_callFunction( mainCtx, "addToState", &addArg, 1 );
+	if ( !addRes || addRes->asInt() != 7 || first.writes != 7 )
+	{
+		assert(0);
+		wr_free( importOut );
+		wr_destroyState( w );
+		return;
+	}
+
+	first.magic = 222;
+	r = wr_callFunction( mainCtx, "readMagic" );
+	if ( !r || r->asInt() != 222 )
+	{
+		assert(0);
+		wr_free( importOut );
+		wr_destroyState( w );
+		return;
+	}
+
+	OpaqueStateContext second = { 9001, 10 };
+	wr_setStateContext( w, &second );
+
+	r = wr_callFunction( mainCtx, "readMagic" );
+	if ( !r || r->asInt() != 9001 )
+	{
+		assert(0);
+		wr_free( importOut );
+		wr_destroyState( w );
+		return;
+	}
+
+	wr_makeInt( &addArg, 5 );
+	addRes = wr_callFunction( mainCtx, "addToState", &addArg, 1 );
+	if ( !addRes || addRes->asInt() != 15 || second.writes != 15 || first.writes != 7 )
+	{
+		assert(0);
+		wr_free( importOut );
+		wr_destroyState( w );
+		return;
+	}
+
+	WRContext* importCtx = wr_import( mainCtx, importOut, importLen, true );
+	if ( !importCtx )
+	{
+		assert(0);
+		wr_free( importOut );
+		wr_destroyState( w );
+		return;
+	}
+	WRValue* ir = wr_callFunction( importCtx, "importedReadMagic" );
+	if ( !ir || ir->asInt() != 9001 )
+	{
+		assert(0);
+		wr_destroyState( w );
+		return;
+	}
+
+	wr_destroyState( w );
+}
 #endif
 
 
@@ -766,9 +1839,14 @@ int runTests( int number )
 	wr_loadAllLibs( w );
 	wr_setAllocatedMemoryGCHint( w, 0 );
 
+	// library constants for enum interaction tests (012_enums.c)
+	wr_registerLibraryConstant( w, "TestLC::LIBVAL",  (int32_t)100 ); // never overridden by enum
+	wr_registerLibraryConstant( w, "TestLC::BOTH",    (int32_t)200 ); // shadowed by enum after its declaration
+	wr_registerLibraryConstant( w, "TestMix::LIBONLY",(int32_t)77  ); // lib-only member in a mixed namespace
+
 	char buf[256];
 	int fileNumber = 0;
-	char errMsg[256];
+	WRstr errMsg;
 
 	unsigned char* out;
 	int outLen;
@@ -795,7 +1873,7 @@ int runTests( int number )
 
 				printf( "test [%d][%s]: ", fileNumber, codeName.c_str() );
 
-				wr_compile( code, code.size(), &out, &outLen, errMsg, WR_NON_STRICT_VAR|WR_INCLUDE_GLOBALS );
+				err = wr_compile( code, code.size(), &out, &outLen, &errMsg, WR_INCLUDE_GLOBALS );
 				
 				if ( err )
 				{
@@ -827,7 +1905,7 @@ int runTests( int number )
 				int args;
 				WRValue* firstArg;
 				WRValue* returnValue;
-				while( wr_getYieldInfo(context, &args, &firstArg, &returnValue) )
+				while( wr_getYieldInfo(context, &firstArg, &args, &returnValue) )
 				{
 					if ( args > 0 )
 					{
@@ -918,6 +1996,35 @@ int runTests( int number )
 #endif
 
 	testD();
+	testCallFunctionHashLibraryFallback();
+	testFunctionNameHashAsArgument();
+	testNamedEnumUnqualifiedError();
+	testBlankVariablesCannotBeInitialized();
+	testFunctionNotFoundErrors();
+	testLibFunctionNotFoundErrors();
+	testOnCallbackNotFound();
+	testOnLibCallbackNotFound();
+	testDropClobberedInitializerStores();
+	testDeepHashTableWithWrenchValue();
+	testStateContextOpaquePointer();
+	testCompilerArrayCopiesAndRemoval();
+#ifdef WRENCH_ENABLE_CROSS_MODULE_EXTERNAL_TEST
+	printf( "test [x][discrete_src/utils/test_wrench_cross_module_globals.cpp]: " );
+#ifdef _WIN32
+	int crossModuleResult = system( ".\\test_wrench_cross_module_globals.exe > _cross_module_test.log 2>&1" );
+#else
+	int crossModuleResult = system( "./test_wrench_cross_module_globals > _cross_module_test.log 2>&1" );
+#endif
+	if ( crossModuleResult != 0 )
+	{
+		printf( "FAIL (exit=%d, see _cross_module_test.log)\n", crossModuleResult );
+		err = err ? err : -1;
+	}
+	else
+	{
+		printf( "PASS\n" );
+	}
+#endif
 	testTimeSlices();
 	testImport();
 	testHalt();
@@ -928,12 +2035,17 @@ int runTests( int number )
 	setup();
 
 	testGlobalValues( w );
+	testHostSeededGlobalValue( w );
+	testBlankHostSeededGlobals( w );
 
 	wr_destroyState( w );
 
 	wr_free( someBigArray );
 	wr_destroyContainer( &container );
 
+#ifdef WRENCH_HANDLE_MALLOC_FAIL
+	testArrayMallocFailureHandling();
+#endif
 
 	fclose( tfile );
 #endif
@@ -947,6 +2059,8 @@ void testGlobalValues( WRState* w )
 							"var global_two = 20;\n"
 							"var global_three = 30;\n"
 							"var global_four = 40;\n"
+							"var N = 50;\n"
+							"var AB = 60;\n"
 							
 							"function test1() { global_two = 25; }\n"
 							"function test2() { return global_two == 35; }\n"
@@ -962,8 +2076,8 @@ void testGlobalValues( WRState* w )
 
 	unsigned char* out;
 	int outLen;
-	char errMsg[256];
-	int err = wr_compile( globalTestCode, (int)strlen(globalTestCode), &out, &outLen, errMsg, WR_INCLUDE_GLOBALS|WR_NON_STRICT_VAR );
+	WRstr errMsg;
+	int err = wr_compile( globalTestCode, (int)strlen(globalTestCode), &out, &outLen, &errMsg, WR_INCLUDE_GLOBALS|WR_NON_STRICT_VAR );
 	if ( err )
 	{
 		assert(0);
@@ -978,6 +2092,15 @@ void testGlobalValues( WRState* w )
 		assert(0);
 		printf("used");
 	}
+
+	g = wr_getGlobalRef( gc, "N" );
+	assert( g && g->i == 50 );
+	g = wr_getGlobalRef( gc, "::N" );
+	assert( g && g->i == 50 );
+	g = wr_getGlobalRef( gc, "AB" );
+	assert( g && g->i == 60 );
+	g = wr_getGlobalRef( gc, "::AB" );
+	assert( g && g->i == 60 );
 
 	g = wr_getGlobalRef( gc, "global_one" );
 	assert( g && g->i == 10 );
@@ -1034,6 +2157,118 @@ void testGlobalValues( WRState* w )
 
 	wr_free( out );
 }
+
+#ifndef WRENCH_WITHOUT_COMPILER
+//------------------------------------------------------------------------------
+void testHostSeededGlobalValue( WRState* w )
+{
+	WRstr code;
+	assert( code.fileToBuffer( "tests/024_numbers.c" ) );
+
+	unsigned char* out = 0;
+	int outLen = 0;
+	WRstr errMsg;
+	int err = wr_compile( code, code.size(), &out, &outLen, &errMsg, WR_INCLUDE_GLOBALS );
+	if ( err )
+	{
+		assert(0);
+		return;
+	}
+
+	WRstr logger;
+	wr_registerFunction( w, "print", emit, &logger );
+	wr_registerFunction( w, "println", emitln, &logger );
+
+	WRContext* context = wr_newContext( w, out, outLen, true );
+	if ( !context )
+	{
+		assert(0);
+		return;
+	}
+
+	WRValue* n = wr_getGlobalRef( context, "N" );
+	if ( !n )
+	{
+		assert(0);
+		wr_destroyContext( context );
+		return;
+	}
+	wr_makeInt( n, 123456789 );
+
+	WRValue* result = wr_executeContext( context );
+	if ( !result || wr_getLastError( w ) != 0 || logger.size() != 0 )
+	{
+		assert(0);
+		wr_destroyContext( context );
+		return;
+	}
+
+	result = wr_callFunction( context, "hostSeededGlobalN" );
+	if ( !result || result->asInt() != 123456789 )
+	{
+		assert(0);
+		wr_destroyContext( context );
+		return;
+	}
+
+	wr_destroyContext( context );
+}
+
+//------------------------------------------------------------------------------
+void testBlankHostSeededGlobals( WRState* w )
+{
+	const char* code =
+		"blank A;\n"
+		"blank var B;\n"
+		"var blank C;\n"
+		"checkBlankSeededGlobals(A, B, C);\n";
+
+	unsigned char* out = 0;
+	int outLen = 0;
+	WRstr errMsg;
+	int err = wr_compile( code, (int)strlen(code), &out, &outLen, &errMsg, WR_INCLUDE_GLOBALS );
+	if ( err )
+	{
+		assert(0);
+		return;
+	}
+
+	g_blankSeedCallbackSeen = 0;
+	g_blankSeedCallbackOk = 0;
+	wr_registerFunction( w, "checkBlankSeededGlobals", checkBlankSeededGlobals );
+
+	WRContext* context = wr_newContext( w, out, outLen, true );
+	if ( !context )
+	{
+		assert(0);
+		return;
+	}
+
+	WRValue* a = wr_getGlobalRef( context, "A" );
+	WRValue* b = wr_getGlobalRef( context, "B" );
+	WRValue* c = wr_getGlobalRef( context, "C" );
+	if ( !a || !b || !c )
+	{
+		assert(0);
+		wr_destroyContext( context );
+		return;
+	}
+
+	wr_makeInt( a, 101 );
+	wr_makeInt( b, 202 );
+	wr_makeInt( c, 303 );
+
+	WRValue* result = wr_executeContext( context );
+	if ( !result || wr_getLastError( w ) != 0 || !g_blankSeedCallbackSeen || !g_blankSeedCallbackOk )
+	{
+		assert(0);
+		wr_destroyContext( context );
+		return;
+	}
+
+	wr_destroyContext( context );
+}
+#endif
 
 //------------------------------------------------------------------------------
 void testStackOverflow()
@@ -1093,7 +2328,38 @@ void testScheduler()
 	scheduler.addThread( out, outLen, 10, true );
 	scheduler.tick(10);
 
-	//printf( "%s\n", logger.c_str() );
+	// Stress many short-lived yielded tasks finishing in a single tick.
+	const char* shortYield = "println(\"start\"); yield(0); println(\"end\");";
+	wr_compile( shortYield, strlen(shortYield), &out, &outLen );
+	int ids[64];
+	for( int i=0; i<64; ++i )
+	{
+		ids[i] = scheduler.addThread( out, outLen, 1000, false );
+		assert( ids[i] > 0 );
+	}
+	assert( countStringHits( logger, "start\n" ) >= 64 );
+
+	scheduler.tick(1000);
+	assert( countStringHits( logger, "end\n" ) >= 64 );
+	for( int i=0; i<64; ++i )
+	{
+		assert( !scheduler.removeTask(ids[i]) );
+	}
+	wr_free( out );
+
+	// Validate removeTask behavior on active yielded tasks.
+	const char* foreverYield = "for(;;) { yield(0); }";
+	wr_compile( foreverYield, strlen(foreverYield), &out, &outLen );
+	int idA = scheduler.addThread( out, outLen, 1000, false );
+	int idB = scheduler.addThread( out, outLen, 1000, false );
+	assert( idA > 0 && idB > 0 );
+
+	assert( scheduler.removeTask(idA) );
+	assert( !scheduler.removeTask(idA) );
+	assert( scheduler.removeTask(idB) );
+	assert( !scheduler.removeTask(idB) );
+	assert( !scheduler.removeTask(0x12345678) );
+	wr_free( out );
 
 #endif
 }
@@ -1179,30 +2445,34 @@ void testD()
 
 
 
-	unsigned char* outBytes;
+	unsigned char* outBytes = 0;
 	int outLen;
 	WRContext* context = 0;
 	WRFunction* function = 0;
 
 
-	char errorMessage[1024] = "";
-	int err = wr_compile( d, strlen(d), &outBytes, &outLen, errorMessage );
+	WRstr errorMessage;
+	int err = wr_compile( d, strlen(d), &outBytes, &outLen, &errorMessage );
 	if ( err )
 	{
-		printf( "%d:\n%s\n", err, errorMessage );
+		printf( "%d:\n%s\n", err, errorMessage.c_str() );
 	}
 	else
 	{
-		context = wr_run( w, outBytes, outLen ); // load and run the code!
+			context = wr_run( w, outBytes, outLen ); // load and run the code!
 		if ( !context )
 		{
 			printf( "null context\n" );
 		}
-		else
-		{
-			assert( function = wr_getFunction( context, "tick" ) );
+			else
+			{
+				function = wr_getFunction( context, "tick" );
+				if ( !function )
+				{
+					assert(0);
+				}
+			}
 		}
-	}
 
 
 	if ( function )
@@ -1214,7 +2484,10 @@ void testD()
 		}
 	}
 
-	wr_free( outBytes );
+	if ( outBytes )
+	{
+		wr_free( outBytes );
+	}
 	wr_destroyState( w );
 }
 
@@ -1393,7 +2666,7 @@ const unsigned char Pbasic_bytecode[]=
 	0x01, 0x00, 0x00, 0x04, 0x0D, 0x00, 0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x57, 0x6F, 0x72, 0x6C, // 16
 	0x64, 0x21, 0x0A, 0x06, 0x01, 0x88, 0x8A, 0x37, 0x16, 0xCF, 0x00, 0x00, 0xAF, 0x0A, 0x70, 0x00, // 32
 	0x0F, 0x09, 0x20, 0x00, 0x06, 0x01, 0x88, 0x8A, 0x37, 0x16, 0x90, 0x00, 0x37, 0xEF, 0x09, 0x02, // 48
-	0xEF, 0x14, 0x94, 0xF8, 0x8F, 0x5A, // 54
+	0xEF, 0x14, 0x95, 0xF8, 0x8F, 0x5A, // 54
 };
 
 void logBlank( WRContext* c, const WRValue* argv, const int argn, WRValue& retVal, void* usr ) { }
@@ -1428,7 +2701,7 @@ void setup()
 
 	int err = wr_compile( wrenchCode, (int)strlen(wrenchCode), &outBytes, &outLen );
 	
-				assert( err == 0 );
+	assert( err == 0 );
 	
 	if ( err == 0 )
 	{

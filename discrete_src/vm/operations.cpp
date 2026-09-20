@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2025 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -23,6 +23,9 @@ SOFTWARE.
 *******************************************************************************/
 
 #include "wrench.h"
+
+// Explicit two's-complement wrap semantics for integer negate.
+inline int32_t wr_ineg_wrap( const int32_t a ) { return (int32_t)(0u - (uint32_t)a); }
 
 //------------------------------------------------------------------------------
 bool wr_concatStringCheck( WRValue* to, WRValue* from, WRValue* target )
@@ -89,34 +92,51 @@ bool wr_concatStringCheck( WRValue* to, WRValue* from, WRValue* target )
 }
 
 //------------------------------------------------------------------------------
-void wr_growValueArray( WRGCObject* va, int newMinIndex )
+bool wr_growValueArray( WRGCObject* va, uint32_t newMinIndex )
 {
-	int size_of = (va->m_type == SV_CHAR) ? 1 : sizeof(WRValue);
+	const size_t size_of = (va->m_type == SV_CHAR) ? 1 : sizeof(WRValue);
 
-	// increase size to accomodate new element
-	int size_el = va->m_size * size_of;
+	if ( newMinIndex < va->m_size )
+	{
+		return true;
+	}
+
+	// increase size to accommodate new element
+	const size_t size_el = va->m_size * size_of;
+	const size_t elements = (size_t)newMinIndex + 1;
+
+	if ( (newMinIndex == (uint32_t)-1) || (elements > ((size_t)-1) / size_of) )
+	{
+#ifdef WRENCH_HANDLE_MALLOC_FAIL
+		g_mallocFailed = true;
+#endif
+		return false;
+	}
 
 	// create new array to hold the data, and g_free the existing one
-	uint8_t* old = va->m_Cdata;
-
-	va->m_Cdata = (uint8_t *)g_malloc( (newMinIndex + 1) * size_of );
+	uint8_t* grown = (uint8_t *)g_malloc( elements * size_of );
 
 #ifdef WRENCH_HANDLE_MALLOC_FAIL
-	if ( !va->m_Cdata )
+	if ( !grown )
 	{
-		va->m_Cdata = old;
 		g_mallocFailed = true;
-		return;
+		return false;
 	}
 #endif
 	
-	memcpy( va->m_Cdata, old, size_el );
-	g_free( old );
+	if ( size_el )
+	{
+		memcpy( grown, va->m_Cdata, size_el );
+	}
+	g_free( va->m_Cdata );
+	va->m_Cdata = grown;
 	
 	va->m_size = newMinIndex + 1;
 
 	// clear new entries
 	memset( va->m_Cdata + size_el, 0, (va->m_size * size_of) - size_el );
+
+	return true;
 }
 
 static WRValue s_temp1;
@@ -204,11 +224,11 @@ uint32_t WRValue::getHashEx() const
 		uint32_t hash = wr_hash(va->m_hashTable, va->m_mod * sizeof(uint32_t));
 
 		// hash each element, positionally dependant
-		for (uint32_t i = 0; i < va->m_mod; ++i)
+		for (uint32_t e = 0; e < va->m_mod; ++e)
 		{
-			if (va->m_hashTable[i] != WRENCH_NULL_HASH)
+			if (va->m_hashTable[e] != WRENCH_NULL_HASH)
 			{
-				uint32_t h = i << 16 | va->m_Vdata[i << 1].getHash();
+				uint32_t h = e << 16 | va->m_Vdata[e << 1].getHash();
 				hash = wr_hash(&h, 4, hash);
 			}
 		}
@@ -218,9 +238,9 @@ uint32_t WRValue::getHashEx() const
 	{
 		uint32_t hash = wr_hash((char*)&va->m_hashTable, sizeof(void*)); // this is in ROM and must be identical for the struct to be the same (same namespace)
 
-		for (uint32_t i = 0; i < va->m_mod; ++i)
+		for (uint32_t m = 0; m < va->m_mod; ++m)
 		{
-			const uint8_t* offset = va->m_ROMHashTable + (i * 5);
+			const uint8_t* offset = va->m_ROMHashTable + (m * 5);
 			if ((uint32_t)READ_32_FROM_PC(offset) != WRENCH_NULL_HASH)
 			{
 				uint32_t h = va->m_Vdata[READ_8_FROM_PC(offset + 4)].getHash();
@@ -249,7 +269,10 @@ void wr_valueToEx( const WRValue* ex, WRValue* value )
 		{
 			if ( s >= ex->va->m_size )
 			{
-				wr_growValueArray( ex->va, s );
+				if ( !wr_growValueArray(ex->va, s) )
+				{
+					return; // grow failed, don't write out of bounds
+				}
 				ex->va->m_creatorContext->allocatedMemoryHint += s * ((ex->va->m_type == SV_CHAR) ? 1 : sizeof(WRValue));
 			}
 
@@ -257,7 +280,7 @@ void wr_valueToEx( const WRValue* ex, WRValue* value )
 			{
 				ex->va->m_Cdata[s] = value->ui;
 			}
-			else 
+			else
 			{
 				WRValue* V = ex->va->m_Vdata + s;
 				wr_assign[(V->type<<2)+value->type](V, value);
@@ -371,7 +394,7 @@ WRReturnSingleFunc wr_LogicalNot[4] =
 
 
 //------------------------------------------------------------------------------
-void doNegate_I( WRValue* value, WRValue* target ) { target->p2 = INIT_AS_INT; target->i = -value->i; }
+void doNegate_I( WRValue* value, WRValue* target ) { target->p2 = INIT_AS_INT; target->i = wr_ineg_wrap( value->i ); }
 void doNegate_F( WRValue* value, WRValue* target ) { target->p2 = INIT_AS_FLOAT; target->f = -value->f; }
 void doNegate_E( WRValue* value, WRValue* target )
 {

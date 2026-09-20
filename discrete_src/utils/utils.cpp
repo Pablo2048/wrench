@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2025 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -23,6 +23,8 @@ SOFTWARE.
 *******************************************************************************/
 
 #include "wrench.h"
+
+void wr_destroyContextEx( WRContext* context );
 
 WR_ALLOC g_malloc = &malloc;
 WR_FREE g_free = &free;
@@ -136,11 +138,62 @@ WRValue* WrenchValue::asArrayMember( const int index )
 	}
 	else if ( index >= (int)m_value->va->m_size )
 	{
-		wr_growValueArray( m_value->va, index );
+		if ( !wr_growValueArray(m_value->va, index) )
+		{
+			return m_value;
+		}
 		m_context->allocatedMemoryHint += index * ((m_value->va->m_type == SV_CHAR) ? 1 : sizeof(WRValue));
 	}
 
 	return (WRValue*)m_value->va->get( index );
+}
+
+//------------------------------------------------------------------------------
+WRValue* WrenchValue::addHashTableValue( const char* key )
+{
+	if ( !m_value || !m_context || !key )
+	{
+		return 0;
+	}
+
+	if ( m_value->xtype != WR_EX_HASH_TABLE )
+	{
+		m_value->va = m_context->getSVA( 0, SV_HASH_TABLE, true );
+#ifdef WRENCH_HANDLE_MALLOC_FAIL
+		if ( !m_value->va )
+		{
+			m_value->p2 = INIT_AS_INT;
+			return 0;
+		}
+#endif
+		m_value->p2 = INIT_AS_HASH_TABLE;
+	}
+
+	uint32_t hash = wr_hashStr( key );
+	WRValue* entry = (WRValue*)(m_value->va->exists( hash, false ));
+	if ( !entry )
+	{
+		entry = (WRValue*)(m_value->va->get(hash));
+		if ( entry )
+		{
+			wr_makeString( m_context, entry + 1, key );
+		}
+	}
+
+	return entry ? &(entry->deref()) : 0;
+}
+
+//------------------------------------------------------------------------------
+WRValue* WrenchValue::getHashTableValue( const char* key )
+{
+	if ( !m_value || !m_context || !key || (m_value->xtype != WR_EX_HASH_TABLE) )
+	{
+		return 0;
+	}
+
+	WRValue* entry = (WRValue*)(m_value->va->exists( wr_hashStr(key), false ));
+
+	return entry ? &(entry->deref()) : 0;
 }
 
 //------------------------------------------------------------------------------
@@ -157,6 +210,8 @@ WRState* wr_newState( int stackSize )
 	w->stackSize = stackSize;
 	w->allocatedMemoryLimit = WRENCH_DEFAULT_ALLOCATED_MEMORY_GC_HINT;
 
+	w->ctx = (void*)0;
+	
 	return w;
 }
 
@@ -184,21 +239,21 @@ void wr_destroyState( WRState* w )
 }
 
 //------------------------------------------------------------------------------
-bool wr_getYieldInfo( WRContext* context, int* args, WRValue** firstArg, WRValue** returnValue )
+bool wr_getYieldInfo( WRContext* context, WRValue** args, int* argnum, WRValue** returnValue )
 {
 	if ( !context || !context->yield_pc )
 	{
 		return false;
 	}
 
-	if ( args )
+	if ( argnum )
 	{
-		*args = context->yieldArgs;
+		*argnum = context->yieldArgs;
 	}
 
-	if ( firstArg )
+	if ( args )
 	{
-		*firstArg = context->yield_stackTop - context->yieldArgs;
+		*args = context->yield_stackTop - context->yieldArgs;
 	}
 
 	if ( returnValue )
@@ -224,6 +279,12 @@ bool wr_executeFunctionZero( WRContext* context )
 //------------------------------------------------------------------------------
 WRContext* wr_createContext( WRState* w, const unsigned char* block, const int blockSize, bool takeOwnership, WRValue* stack )
 {
+	if ( blockSize < 8 )
+	{
+		w->err = WR_ERR_bad_bytecode_CRC;
+		return 0;
+	}
+
 	// CRC the code block, at least is it what the compiler intended?
 	uint32_t hash = READ_32_FROM_PC(block + (blockSize - 4));
 	if ( hash != wr_hash_read8(block, (blockSize - 4)) + WRENCH_VERSION_MAJOR )
@@ -234,11 +295,19 @@ WRContext* wr_createContext( WRState* w, const unsigned char* block, const int b
 
 	int globals = READ_8_FROM_PC( block );
 	int localFuncs = READ_8_FROM_PC(block  + 1); // how many?
+
+	// 3-byte header + function table + 4-byte CRC must fit in block
+	int headerSize = 3 + (localFuncs * WR_FUNCTION_CORE_SIZE);
+	if ( headerSize + 4 > blockSize )
+	{
+		w->err = WR_ERR_bad_bytecode_CRC;
+		return 0;
+	}
 	
 	int needed = sizeof(WRContext) // class
 				 + (globals * sizeof(WRValue))  // globals
 				 + (localFuncs * sizeof(WRFunction)) // functions
-				 + (stack ? 0 : (w->stackSize * sizeof(WRValue))); // stack
+				 + (stack ? 0 : (w->stackSize * sizeof(WRValue) + (int)sizeof(void*) - 1)); // stack + alignment slop
 
 	WRContext* C = (WRContext *)g_malloc( needed );
 #ifdef WRENCH_HANDLE_MALLOC_FAIL
@@ -257,7 +326,16 @@ WRContext* wr_createContext( WRState* w, const unsigned char* block, const int b
 
 	C->globals = globals;
 	
-	C->stack = stack ? stack : (WRValue *)(C->localFunctions + localFuncs);
+	if ( stack )
+	{
+		C->stack = stack;
+	}
+	else
+	{
+		uintptr_t rawStack = (uintptr_t)(C->localFunctions + localFuncs);
+		uintptr_t alignedStack = (rawStack + (sizeof(void*) - 1)) & ~((uintptr_t)sizeof(void*) - 1);
+		C->stack = (WRValue*)alignedStack;
+	}
 
 	C->flags |= takeOwnership ? WRC_OwnsMemory : 0;
 	
@@ -285,7 +363,6 @@ WRContext* wr_createContext( WRState* w, const unsigned char* block, const int b
 	{
 		C->codeStart += 4 + READ_32_FROM_PC( C->codeStart );		
 	}
-
 
 	int pos = 3;
 	for( int i=0; i<C->numLocalFunctions; ++i )
@@ -320,7 +397,7 @@ WRContext* wr_import( WRContext* context, const unsigned char* block, const int 
 	if ( !wr_callFunction(import, (WRFunction*)0) )
 	{ 
 		// imported context may not yield
-		wr_destroyContext( context );
+		wr_destroyContextEx( import );
 		return 0;
 	}
 
@@ -334,6 +411,29 @@ WRContext* wr_import( WRContext* context, const unsigned char* block, const int 
 	}
 
 	return import;
+}
+
+//------------------------------------------------------------------------------
+bool wr_isBytecodeValid( const uint8_t* bytecode, const unsigned int len, uint32_t* hash )
+{
+	if ( len < 8 )
+	{
+		return false;
+	}
+
+	// CRC the code block, at least is it what the compiler intended?
+	uint32_t h = READ_32_FROM_PC(bytecode + (len - 4));
+	if ( h != wr_hash_read8(bytecode, (len - 4)) + WRENCH_VERSION_MAJOR )
+	{
+		return false;
+	}
+
+	if ( hash )
+	{
+		*hash = h;
+	}
+
+	return true;
 }
 
 //------------------------------------------------------------------------------
@@ -368,19 +468,19 @@ WRContext* wr_run( WRState* w,
 				   const bool takeOwnership,
 				   const bool destroyContext )
 {
-	WRContext* ctx = wr_newContext( w, block, blockSize, takeOwnership );
+	WRContext* context = wr_newContext( w, block, blockSize, takeOwnership );
 
-	if ( ctx )
+	if ( context )
 	{
-		if ( (!wr_callFunction(ctx, (WRFunction*)0) && !ctx->yield_pc)
+		if ( (!wr_callFunction(context, (WRFunction*)0) && !context->yield_pc)
 			 || destroyContext )
 		{
-			wr_destroyContext( ctx );
-			ctx = 0;
+			wr_destroyContext( context );
+			context = 0;
 		}
 	}
 
-	return ctx;
+	return context;
 }
 
 //------------------------------------------------------------------------------
@@ -462,7 +562,7 @@ bool wr_runCommand( WRState* w, const char* sourceCode, const int size )
 }
 
 //------------------------------------------------------------------------------
-void wr_setAllocatedMemoryGCHint( WRState* state, const uint16_t bytes )
+void wr_setAllocatedMemoryGCHint( WRState* state, const uint32_t bytes )
 {
 	state->allocatedMemoryLimit = bytes;
 }
@@ -471,11 +571,8 @@ void wr_setAllocatedMemoryGCHint( WRState* state, const uint16_t bytes )
 void wr_registerFunction( WRState* w, const char* name, WR_C_CALLBACK function, void* usr )
 {
 	WRValue* V = w->globalRegistry.getAsRawValueHashTable( wr_hashStr(name) );
-	if ( V != (void*)WRENCH_NULL_HASH )
-	{
-		V->usr = usr;
-		V->ccb = function;
-	}
+	V->usr = usr;
+	V->ccb = function;
 }
 
 //------------------------------------------------------------------------------
@@ -528,34 +625,6 @@ float WRValue::asFloat() const
 	}
 
 	return singleValue().asFloat();
-}
-
-//------------------------------------------------------------------------------
-void WRValue::setInt( const int val )
-{
-	if ( type == WR_REF )
-	{
-		r->setInt( val );
-	}
-	else
-	{
-		p2 = INIT_AS_INT;
-		i = val;
-	}
-}
-
-//------------------------------------------------------------------------------
-void WRValue::setFloat( const float val )
-{
-	if ( type == WR_REF )
-	{
-		r->setFloat( val );
-	}
-	else
-	{
-		p2 = INIT_AS_FLOAT;
-		f = val;
-	}
 }
 
 //------------------------------------------------------------------------------
@@ -618,11 +687,11 @@ bool WRValue::isHashTable( int* len ) const
 	return false;
 }
 
+//------------------------------------------------------------------------------
 bool WRValue::isStruct() const
 {
 	return IS_STRUCT( deref().xtype );
 }
-
 
 //------------------------------------------------------------------------------
 WRValue* WRValue::indexArray( WRContext* context, const uint32_t index, const bool create ) const
@@ -656,7 +725,10 @@ WRValue* WRValue::indexArray( WRContext* context, const uint32_t index, const bo
 			return 0;
 		}
 		
-		wr_growValueArray( V.va, index );
+		if ( !wr_growValueArray(V.va, index) )
+		{
+			return 0;
+		}
 		context->allocatedMemoryHint += index * ((V.va->m_type == SV_CHAR) ? 1 : sizeof(WRValue));
 	}
 
@@ -987,12 +1059,6 @@ const WRValue::Iterator WRValue::Iterator::operator++()
 }
 
 //------------------------------------------------------------------------------
-WRValue* wr_callFunction( WRContext* context, const char* functionName, const WRValue* argv, const int argn )
-{
-	return wr_callFunction( context, wr_hashStr(functionName), argv, argn );
-}
-
-//------------------------------------------------------------------------------
 WRValue* wr_callFunction( WRContext* context, const int32_t hash, const WRValue* argv, const int argn )
 {
 	WRValue* cF = 0;
@@ -1006,8 +1072,30 @@ WRValue* wr_callFunction( WRContext* context, const int32_t hash, const WRValue*
 		}
 
 		cF = context->registry.getAsRawValueHashTable( hash );
-		if ( !cF->wrf )
+		if ( !cF->wrf ) // not found in the registry, but...
 		{
+				cF = context->w->globalRegistry.getAsRawValueHashTable(hash);
+				if ( cF->lcb ) // it was a library function, call it
+				{
+					if ( context->yield_pc )
+					{
+						context->w->err = WR_ERR_cannot_call_function_context_yielded;
+						return 0;
+					}
+
+					WRValue* stack = context->stack + context->stackOffset;
+					int a = 0;
+				for( ; a<argn; ++a )
+				{
+					stack[a] = argv[a];
+				}
+
+				stack[a].init();
+				context->w->err = WR_ERR_None;
+				cF->lcb( stack + a, argn, context );
+				return (context->w->err) ? 0 : stack + a;
+			}
+			
 			context->w->err = WR_ERR_wrench_function_not_found;
 			return 0;
 		}
@@ -1023,9 +1111,9 @@ WRValue* wr_returnValueFromLastCall( WRContext* context )
 }
 
 //------------------------------------------------------------------------------
-WRFunction* wr_getFunction( WRContext* context, const char* functionName )
+WRFunction* wr_getFunction( WRContext* context, const uint32_t functionHash )
 {
-	WRValue* f = context->registry.exists(wr_hashStr(functionName), false);
+	WRValue* f = context->registry.exists(functionHash, false);
 	return f ? f->wrf : 0;
 }
 
@@ -1037,9 +1125,8 @@ WRValue* wr_getGlobalRef( WRContext* context, const char* label )
 	{
 		return 0;
 	}
-	size_t len = strlen(label);
 	uint32_t match;
-	if ( len < 3 || (label[0] == ':' && label[1] == ':') )
+	if ( label[0] == ':' && label[1] == ':' )
 	{
 		match = wr_hashStr( label );
 	}
@@ -1060,22 +1147,6 @@ WRValue* wr_getGlobalRef( WRContext* context, const char* label )
 	}
 
 	return 0;
-}
-
-//------------------------------------------------------------------------------
-WRValue& wr_makeInt( WRValue* val, int i )
-{
-	val->p2 = INIT_AS_INT;
-	val->i = i;
-	return *val;
-}
-
-//------------------------------------------------------------------------------
-WRValue& wr_makeFloat( WRValue* val, float f )
-{
-	val->p2 = INIT_AS_FLOAT;
-	val->f = f;
-	return *val;
 }
 
 //------------------------------------------------------------------------------
@@ -1560,6 +1631,11 @@ const char* c_opcodeName[] =
 	"InitVar",
 
 	"DebugInfo",
+
+	"LocalBZ",
+	"LocalBZ8",
+	"GlobalBZ",
+	"GlobalBZ8",
 };
 
 //------------------------------------------------------------------------------
@@ -1593,6 +1669,7 @@ const char* c_errStrings[]=
 	"WR_ERR_new_assign_by_label_or_offset_not_both",
 	"WR_ERR_struct_not_exported",
 	"WR_ERR_empty_parens",
+	"WR_ERR_blank_variables_cannot_be_initialized",
 
 	"WR_ERR_run_must_be_called_by_itself_first",
 	"WR_ERR_hash_table_size_exceeded",
@@ -1627,6 +1704,5 @@ const char* c_errStrings[]=
 
 	"WR_ERR_division_by_zero",
 };
-
 
 #endif

@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2023 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -61,6 +61,8 @@ void WRDebugClientInterface::load( const uint8_t* byteCode, const int size )
 	I->m_scratchContext->gc(0);
 
 	I->m_comm->send( WrenchPacketScoped(WRD_Load, size, byteCode) );
+
+	WrenchPacketScoped r( I->getPacket() );
 
 	// invalidate source block;
 	g_free( I->m_sourceBlock );
@@ -226,10 +228,11 @@ SimpleLL<WrenchCallStackEntry>* WRDebugClientInterface::getCallstack()
 	uint32_t count = r.packet->param1;
 	for( uint32_t i=0; i<count; ++i )
 	{
-		entries[i].onLine = wr_x32( entries[i].onLine );
-		entries[i].locals = wr_x16( entries[i].locals );
-		*I->m_callStack->addTail() = entries[i];
-	}
+			entries[i].onLine = wr_x32( entries[i].onLine );
+			entries[i].locals = wr_x16( entries[i].locals );
+			entries[i].stackOffset = wr_x16( entries[i].stackOffset );
+			*I->m_callStack->addTail() = entries[i];
+		}
 
 	I->m_callstackDirty = false;
 	return I->m_callStack;

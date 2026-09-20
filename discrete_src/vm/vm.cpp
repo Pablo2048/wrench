@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2025 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -200,6 +200,12 @@ void wr_forceYield( WRState* w )
 {
 	w->yieldEnabled = true; // prevent a race in case the count is decremented before this flag is checked
 	w->sliceInstructionCount = 1;
+}
+
+//------------------------------------------------------------------------------
+int wr_slicesUsedLastCall( WRState* w )
+{
+	return w->lastSlicesUsed;
 }
 
 #define CHECK_FORCE_YIELD { if ( !--w->sliceInstructionCount && w->yieldEnabled ) { context->yieldArgs = 0; context->flags |= (uint8_t)WRC_ForceYielded; goto doYield; } }
@@ -600,6 +606,11 @@ WRValue* wr_callFunction( WRContext* context, WRFunction* function, const WRValu
 		&&InitVar,
 
 		&&DebugInfo,
+
+		&&LocalBZ,
+		&&LocalBZ8,
+		&&GlobalBZ,
+		&&GlobalBZ8,
 	};
 #endif
 
@@ -607,7 +618,6 @@ WRValue* wr_callFunction( WRContext* context, WRFunction* function, const WRValu
 
 	union
 	{
-		unsigned char findex;
 		WRValue* register0;
 		WRGCObject* va;
 		const unsigned char *hashLoc;
@@ -823,6 +833,9 @@ yieldContinue:
 #if defined(WRENCH_TIME_SLICES) || defined(WRENCH_INCLUDE_DEBUG_CODE)
 doYield:
 #endif
+#if defined(WRENCH_TIME_SLICES)
+				w->lastSlicesUsed = w->instructionsPerSlice - w->sliceInstructionCount;
+#endif
 				context->yield_pc = pc;
 				context->yield_stackTop = stackTop->init();
 				context->yield_frameBase = frameBase;
@@ -857,19 +870,31 @@ debugReturn:
 
 				uint32_t fhash = READ_32_FROM_PC(pc);
 				pc += 4;
-				if ( ! ((register1 = w->globalRegistry.getAsRawValueHashTable(fhash))->ccb) )
+				register1 = w->globalRegistry.getAsRawValueHashTable(fhash);
+				if ( !register1 || !register1->ccb )
 				{
 					if ( (import = context->imported) ) // check imported code
 					{
 						while( import != context )
 						{
 							WRValue* I;
-							if ( (I = import->registry.exists(fhash, false)) )
-							{
-								// import shares our stack, tell it where to find it's args
-								import->stackOffset = (stackTop - stackBase);
-								wr_callFunction( import, I->wrf, stackTop - args, args );
-								register0 = stackTop;
+								if ( (I = import->registry.exists(fhash, false)) )
+								{
+									// import shares our stack, tell it where to find it's args
+									uint16_t savedOffset = import->stackOffset;
+									import->stackOffset = (uint16_t)(stackTop - context->stack);
+									register0 = wr_callFunction( import, I->wrf, stackTop - args, args );
+									import->stackOffset = savedOffset;
+									if ( import->yield_pc )
+									{
+										w->err = WR_ERR_cannot_call_function_context_yielded;
+										return 0;
+									}
+									if ( !register0 )
+									{
+										return 0;
+									}
+									register0 = stackTop;
 
 								if ( *pc == O_NewObjectTable )
 								{
@@ -908,8 +933,15 @@ debugReturn:
 						}
 					}
 
-					w->err = WR_ERR_function_not_found;
-					return 0;
+					if ( w->onCallbackNotFound )
+					{
+						w->onCallbackNotFound( fhash, context, stackTop - args, args, *stackTop, 0 );
+					}
+					else
+					{
+						w->err = WR_ERR_function_not_found;
+						return 0;
+					}
 				}
 				else
 				{
@@ -941,7 +973,8 @@ newObjOut:
 
 				uint32_t fhash = READ_32_FROM_PC(pc);
 				pc += 4;
-				if ( !((register1 = w->globalRegistry.getAsRawValueHashTable(fhash))->ccb) )
+				register1 = w->globalRegistry.getAsRawValueHashTable(fhash);
+				if ( !register1 || !register1->ccb )
 				{
 					// is in an imported context
 					if ( (import = context->imported) )
@@ -951,8 +984,19 @@ newObjOut:
 							if ( (register0 = import->registry.exists(fhash, false)) )
 							{
 								// import shares our stack, tell it where to find it's args
-								import->stackOffset = (stackTop - stackBase);
-								wr_callFunction( import, register0->wrf, stackTop - args, args );
+								uint16_t savedOffset = import->stackOffset;
+								import->stackOffset = (uint16_t)(stackTop - context->stack);
+								register0 = wr_callFunction( import, register0->wrf, stackTop - args, args );
+								import->stackOffset = savedOffset;
+								if ( import->yield_pc )
+								{
+									w->err = WR_ERR_cannot_call_function_context_yielded;
+									return 0;
+								}
+								if ( !register0 )
+								{
+									return 0;
+								}
 								goto CallFunctionByHashAndPop_continue;
 							}
 
@@ -960,8 +1004,15 @@ newObjOut:
 						}
 					}
 
-					w->err = WR_ERR_function_not_found;
-					return 0;
+					if ( w->onCallbackNotFound )
+					{
+						w->onCallbackNotFound( fhash, context, stackTop - args, args, *stackTop, 0 );
+					}
+					else
+					{
+						w->err = WR_ERR_function_not_found;
+						return 0;
+					}
 				}
 				else
 				{
@@ -1045,13 +1096,24 @@ callFunction:
 
 				args = READ_8_FROM_PC(pc++); // which have already been pushed
 
-				if ( ! ((register1 = w->globalRegistry.getAsRawValueHashTable(READ_32_FROM_PC(pc)))->lcb) )
+				uint32_t fhash = READ_32_FROM_PC(pc);
+				register1 = w->globalRegistry.getAsRawValueHashTable(fhash);
+				if ( !register1 || !register1->lcb )
 				{
-					w->err = WR_ERR_lib_function_not_found;
-					return 0;
+					if ( w->onLibCallbackNotFound )
+					{
+						w->onLibCallbackNotFound( fhash, stackTop, args, context );
+					}
+					else
+					{
+						w->err = WR_ERR_lib_function_not_found;
+						return 0;
+					}
 				}
-
-				register1->lcb( stackTop, args, context );
+				else
+				{
+					register1->lcb( stackTop, args, context );
+				}
 				
 				pc += 4;
 
@@ -1084,13 +1146,25 @@ callFunction:
 			{
 				args = READ_8_FROM_PC(pc++); // which have already been pushed
 
-				if ( ! ((register1 = w->globalRegistry.getAsRawValueHashTable(READ_32_FROM_PC(pc)))->lcb) )
+				uint32_t fhash = READ_32_FROM_PC(pc);
+				register1 = w->globalRegistry.getAsRawValueHashTable(fhash);
+				if ( !register1 || !register1->lcb )
 				{
-					w->err = WR_ERR_lib_function_not_found;
-					return 0;
+					if ( w->onLibCallbackNotFound )
+					{
+						w->onLibCallbackNotFound( fhash, stackTop, args, context );
+					}
+					else
+					{
+						w->err = WR_ERR_lib_function_not_found;
+						return 0;
+					}
 				}
-
-				register1->lcb( stackTop, args, context );
+				else
+				{
+					register1->lcb( stackTop, args, context );
+				}
+				
 				pc += 4;
 
 				stackTop -= args;
@@ -1172,16 +1246,20 @@ callFunction:
 				else if ( register0->xtype == WR_EX_ARRAY )
 				{
 					va = register0->va;
-					if (va->m_type == SV_VALUE )
+					if ( hash >= va->m_size )
 					{
-						for( uint32_t move = hash; move < va->m_size; ++move )
+						FASTCONTINUE;
+					}
+					else if (va->m_type == SV_VALUE )
+					{
+						for( uint32_t move = hash; (move+1) < va->m_size; ++move )
 						{
 							va->m_Vdata[move] = va->m_Vdata[move+1];
 						}
 					}
 					else if ( register0->va->m_type == SV_CHAR )
 					{
-						for( uint32_t move = hash; move < va->m_size; ++move )
+						for( uint32_t move = hash; (move+1) < va->m_size; ++move )
 						{
 							va->m_Cdata[move] = va->m_Cdata[move+1];
 						}
@@ -1263,6 +1341,9 @@ callFunction:
 				{
 					context->debugInterface->I->codewordEncountered( pc, WRD_FunctionCall | WRD_GlobalStopFunction, stackTop );
 				}
+#endif
+#if defined(WRENCH_TIME_SLICES)
+				w->lastSlicesUsed = w->instructionsPerSlice - w->sliceInstructionCount;
 #endif
 				return &(stackBase)->deref();
 			}
@@ -1433,6 +1514,9 @@ hashIndexJump:
 			CASE(BZ):
 			{
 				register0 = --stackTop;
+#ifdef WRENCH_COMPACT
+compactLoadBZ:
+#endif
 				pc += wr_LogicalNot[register0->type](register0) ? READ_16_FROM_PC(pc) : 2;
 				CHECK_FORCE_YIELD;
 				FASTCONTINUE;
@@ -1441,6 +1525,9 @@ hashIndexJump:
 			CASE(BZ8):
 			{
 				register0 = --stackTop;
+#ifdef WRENCH_COMPACT
+compactLoadBZ8:
+#endif
 				pc += wr_LogicalNot[register0->type](register0) ? (int8_t)READ_8_FROM_PC(pc) : 2;
 				CHECK_FORCE_YIELD;
 				FASTCONTINUE;
@@ -1732,6 +1819,11 @@ NextIterator:
 #ifdef WRENCH_COMPACT //---------------------------------------------------------------------------------------
 //-------------------------------------------------------------------------------------------------------------
 
+			CASE(LocalBZ): { register0 = frameBase + READ_8_FROM_PC(pc++); goto compactLoadBZ; }
+			CASE(LocalBZ8):	{ register0 = frameBase + READ_8_FROM_PC(pc++); goto compactLoadBZ8; }
+			CASE(GlobalBZ):	{ register0 = globalSpace + READ_8_FROM_PC(pc++); goto compactLoadBZ; }
+			CASE(GlobalBZ8): { register0 = globalSpace + READ_8_FROM_PC(pc++); goto compactLoadBZ8; }
+			
 			CASE(PostIncrement):
 			{
 				register0 = stackTop - 1;
@@ -2434,7 +2526,39 @@ compactCompareGG8:
 #else 
 //-------------------------------------------------------------------------------------------------------------
 // NON-COMPACT version
-			
+
+			CASE(LocalBZ):
+			{
+				register0 = frameBase + READ_8_FROM_PC(pc++);
+				pc += wr_LogicalNot[register0->type](register0) ? READ_16_FROM_PC(pc) : 2;
+				CHECK_FORCE_YIELD;
+				FASTCONTINUE;
+			}
+
+			CASE(LocalBZ8):
+			{
+				register0 = frameBase + READ_8_FROM_PC(pc++);
+				pc += wr_LogicalNot[register0->type](register0) ? (int8_t)READ_8_FROM_PC(pc) : 2;
+				CHECK_FORCE_YIELD;
+				FASTCONTINUE;
+			}
+
+			CASE(GlobalBZ):
+			{
+				register0 = globalSpace + READ_8_FROM_PC(pc++);
+				pc += wr_LogicalNot[register0->type](register0) ? READ_16_FROM_PC(pc) : 2;
+				CHECK_FORCE_YIELD;
+				FASTCONTINUE;
+			}
+
+			CASE(GlobalBZ8):
+			{
+				register0 = globalSpace + READ_8_FROM_PC(pc++);
+				pc += wr_LogicalNot[register0->type](register0) ? (int8_t)READ_8_FROM_PC(pc) : 2;
+				CHECK_FORCE_YIELD;
+				FASTCONTINUE;
+			}
+
 			CASE(PostIncrement):
 			{
 				register0 = stackTop - 1;
@@ -3174,7 +3298,6 @@ targetFuncStoreLocalOp:
 #endif//-------------------------------------------------------------------------------------------------------
 //-------------------------------------------------------------------------------------------------------------
 
-
 #ifndef WRENCH_JUMPTABLE_INTERPRETER
 	#ifdef _MSC_VER
 			default: __assume(0); // tells the compiler to make this a jump table
@@ -3183,4 +3306,3 @@ targetFuncStoreLocalOp:
 	}
 #endif
 }
-

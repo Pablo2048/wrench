@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2024 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -101,13 +101,14 @@ void WRContext::gc( WRValue* stackTop )
 				markBase( a );
 			}
 		}
+
+		// mark stack
+		for( WRValue* s=stack + stackOffset; s<stackTop; ++s)
+		{
+			mark( s );
+		}
 	}
 	
-	// mark stack
-	for( WRValue* s=stack; s<stackTop; ++s)
-	{
-		mark( s );
-	}
 
 	// mark context's globals
 	WRValue* globalSpace = (WRValue *)(this + 1); // globals are allocated directly after this context
@@ -153,6 +154,13 @@ void WRContext::gc( WRValue* stackTop )
 //------------------------------------------------------------------------------
 WRGCObject* WRContext::getSVA( int size, WRGCObjectType type, bool init )
 {
+#ifdef WRENCH_HANDLE_MALLOC_FAIL
+	if ( g_mallocFailed )
+	{
+		return 0;
+	}
+#endif
+
 	WRGCObject* ret = (WRGCObject*)g_malloc( sizeof(WRGCObject) );
 
 #ifdef WRENCH_HANDLE_MALLOC_FAIL
@@ -164,10 +172,24 @@ WRGCObject* WRContext::getSVA( int size, WRGCObjectType type, bool init )
 #endif
 
 	memset( (unsigned char*)ret, 0, sizeof(WRGCObject) );
+	int allocated = ret->init( size, type, init );
+
+#ifdef WRENCH_HANDLE_MALLOC_FAIL
+	if ( g_mallocFailed )
+	{
+		if ( ret->m_data )
+		{
+			ret->clear();
+		}
+		g_free( ret );
+		return 0;
+	}
+#endif
+
 	ret->m_nextGC = svAllocated;
 	svAllocated = ret;
 
-	allocatedMemoryHint += ret->init( size, type, init ) + sizeof(WRGCObject);
+	allocatedMemoryHint += allocated + sizeof(WRGCObject);
 
 	if ( (int)type >= SV_VALUE )
 	{
@@ -176,4 +198,3 @@ WRGCObject* WRContext::getSVA( int size, WRGCObjectType type, bool init )
 
 	return ret;
 }
-

@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2024 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -39,6 +39,8 @@ WrenchScheduler::WrenchScheduler( const int stackSizePerThread )
 {
 	m_w = wr_newState( stackSizePerThread );
 	m_tasks = 0;
+	m_lastErr = 0;
+	m_lastErrId = 0;
 }
 
 //------------------------------------------------------------------------------
@@ -58,21 +60,38 @@ WrenchScheduler::~WrenchScheduler()
 void WrenchScheduler::tick( int instructionsPerSlice )
 {
 	wr_setInstructionsPerSlice( m_w, instructionsPerSlice );
-	WrenchScheduledTask* task = m_tasks;
-
-	while( task )
+	WrenchScheduledTask** link = &m_tasks;
+	while( *link )
 	{
+		WrenchScheduledTask* task = *link;
+
+		// If this task is complete, unlink it in-place.
 		if ( !task->context->yield_pc )
 		{
-			const int id = task->id;
-			task = task->next;
-			removeTask( id );
+			*link = task->next;
+			wr_destroyContext( task->context );
+			g_free( task );
+			continue;
 		}
-		else
+
+		wr_callFunction( task->context, (WRFunction*)0, task->context->yield_argv, task->context->yield_argn );
+
+		// A task can finish during this tick or may have faulted; remove it either way.
+		if ( !task->context->yield_pc )
 		{
-			wr_callFunction( task->context, (WRFunction*)0, task->context->yield_argv, task->context->yield_argn );
-			task = task->next;
+			if ( m_w->err )
+			{
+				m_lastErr = m_w->err;
+				m_lastErrId = task->id;
+				m_w->err = 0;
+			}
+			*link = task->next;
+			wr_destroyContext( task->context );
+			g_free( task );
+			continue;
 		}
+
+		link = &task->next;
 	}
 }
 
@@ -93,6 +112,15 @@ int WrenchScheduler::addThread( const uint8_t* byteCode, const int size, const i
 	}
 
 	WrenchScheduledTask* task = (WrenchScheduledTask*)g_malloc( sizeof(WrenchScheduledTask) );
+	if ( !task )
+	{
+#ifdef WRENCH_HANDLE_MALLOC_FAIL
+		g_mallocFailed = true;
+#endif
+		m_w->err = WR_ERR_malloc_failed;
+		wr_destroyContext( context );
+		return -1;
+	}
 	task->context = context;
 	task->next = m_tasks;
 	task->id = ++wr_idGenerator;
@@ -110,7 +138,7 @@ bool WrenchScheduler::removeTask( const int taskId )
 	{
 		if ( task->id == taskId )
 		{
-			wr_destroyContext( m_tasks->context );
+			wr_destroyContext( task->context );
 
 			if ( last )
 			{

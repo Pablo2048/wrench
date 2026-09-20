@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2024 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -26,6 +26,226 @@ SOFTWARE.
 #ifndef WRENCH_WITHOUT_COMPILER
 
 #define KEYHOLE_OPTIMIZER
+
+int wr_operandSizeForOpcode( const uint8_t* opPtr, const uint8_t* end, const uint8_t op );
+
+//------------------------------------------------------------------------------
+static int wr_optimizerOperandSize( const uint8_t* opPtr, const uint8_t* end, const uint8_t op )
+{
+	return (op == O_FUNCTION_CALL_PLACEHOLDER) ? 5 : wr_operandSizeForOpcode( opPtr, end, op );
+}
+
+//------------------------------------------------------------------------------
+static bool wr_decodeOverwriteStore( const unsigned char* code, unsigned int offset, WROverwriteStoreInfo& info )
+{
+	info.valid = true;
+	info.offset = offset;
+	info.opcode = code[offset];
+
+	switch( info.opcode )
+	{
+		case O_AssignToGlobalAndPop:
+		case O_BinaryAdditionAndStoreGlobal:
+		case O_BinarySubtractionAndStoreGlobal:
+		case O_BinaryMultiplicationAndStoreGlobal:
+		case O_BinaryDivisionAndStoreGlobal:
+		{
+			info.global = true;
+			info.index = code[offset + 1];
+			info.length = 2;
+			return true;
+		}
+
+		case O_AssignToLocalAndPop:
+		case O_BinaryAdditionAndStoreLocal:
+		case O_BinarySubtractionAndStoreLocal:
+		case O_BinaryMultiplicationAndStoreLocal:
+		case O_BinaryDivisionAndStoreLocal:
+		{
+			info.global = false;
+			info.index = code[offset + 1];
+			info.length = 2;
+			return true;
+		}
+
+		case O_LiteralInt8ToGlobal:
+		{
+			info.global = true;
+			info.index = code[offset + 1];
+			info.length = 3;
+			return true;
+		}
+
+		case O_LiteralInt8ToLocal:
+		{
+			info.global = false;
+			info.index = code[offset + 1];
+			info.length = 3;
+			return true;
+		}
+
+		case O_LiteralInt16ToGlobal:
+		{
+			info.global = true;
+			info.index = code[offset + 1];
+			info.length = 4;
+			return true;
+		}
+
+		case O_LiteralInt16ToLocal:
+		{
+			info.global = false;
+			info.index = code[offset + 1];
+			info.length = 4;
+			return true;
+		}
+
+		case O_LiteralInt32ToGlobal:
+		case O_LiteralFloatToGlobal:
+		{
+			info.global = true;
+			info.index = code[offset + 1];
+			info.length = 6;
+			return true;
+		}
+
+		case O_LiteralInt32ToLocal:
+		case O_LiteralFloatToLocal:
+		{
+			info.global = false;
+			info.index = code[offset + 1];
+			info.length = 6;
+			return true;
+		}
+	}
+
+	info.valid = false;
+	return false;
+}
+
+//------------------------------------------------------------------------------
+static bool wr_findLastStatementOverwriteStore( WRBytecode& bytecode, WROverwriteStoreInfo& info )
+{
+	info.valid = false;
+	if ( bytecode.all.size() == 0 )
+	{
+		return false;
+	}
+
+	const unsigned char* code = bytecode.all;
+	const uint8_t* end = (const uint8_t*)(code + bytecode.all.size());
+	unsigned int offset = 0;
+	unsigned int lastOpcodeOffset = 0;
+
+	while ( offset < bytecode.all.size() )
+	{
+		lastOpcodeOffset = offset;
+
+		int operandSize = wr_optimizerOperandSize( code + offset + 1, end, code[offset] );
+		if ( operandSize < 0 )
+		{
+			return false;
+		}
+
+		offset += 1 + (unsigned int)operandSize;
+	}
+
+	if ( offset != bytecode.all.size() )
+	{
+		return false;
+	}
+
+	return wr_decodeOverwriteStore( code, lastOpcodeOffset, info );
+}
+
+//------------------------------------------------------------------------------
+static bool wr_statementIsLiteralClobber( WRBytecode& bytecode, const WROverwriteStoreInfo& info )
+{
+	if ( !info.valid )
+	{
+		return false;
+	}
+
+	switch( info.opcode )
+	{
+		case O_LiteralInt8ToGlobal:
+		case O_LiteralInt8ToLocal:
+		case O_LiteralInt16ToGlobal:
+		case O_LiteralInt16ToLocal:
+		case O_LiteralInt32ToGlobal:
+		case O_LiteralInt32ToLocal:
+		case O_LiteralFloatToGlobal:
+		case O_LiteralFloatToLocal:
+			return true;
+
+		case O_AssignToGlobalAndPop:
+		case O_AssignToLocalAndPop:
+		{
+			if ( bytecode.all.size() <= info.length
+				 || (info.offset + info.length) != bytecode.all.size() )
+			{
+				return false;
+			}
+
+			switch( bytecode.all[0] )
+			{
+				case O_LiteralZero:
+				case O_LiteralInt8:
+				case O_LiteralInt16:
+				case O_LiteralInt32:
+				case O_LiteralFloat:
+				case O_LiteralString:
+				{
+					const unsigned char* code = bytecode.all;
+					const uint8_t* end = (const uint8_t*)(code + bytecode.all.size());
+					int operandSize = wr_optimizerOperandSize( code + 1, end, code[0] );
+					return operandSize >= 0 && (1 + (unsigned int)operandSize) == info.offset;
+				}
+			}
+			return false;
+		}
+	}
+
+	return false;
+}
+
+//------------------------------------------------------------------------------
+static void wr_dropLastStatementOverwriteStore( WRBytecode& bytecode, const WROverwriteStoreInfo& info )
+{
+	bytecode.all.shave( info.length );
+
+	switch( info.opcode )
+	{
+		case O_AssignToGlobalAndPop:
+		case O_AssignToLocalAndPop:
+			bytecode.all += (unsigned char)O_PopOne;
+			return;
+
+		case O_BinaryAdditionAndStoreGlobal:
+		case O_BinaryAdditionAndStoreLocal:
+			bytecode.all += (unsigned char)O_BinaryAddition;
+			bytecode.all += (unsigned char)O_PopOne;
+			return;
+
+		case O_BinarySubtractionAndStoreGlobal:
+		case O_BinarySubtractionAndStoreLocal:
+			bytecode.all += (unsigned char)O_BinarySubtraction;
+			bytecode.all += (unsigned char)O_PopOne;
+			return;
+
+		case O_BinaryMultiplicationAndStoreGlobal:
+		case O_BinaryMultiplicationAndStoreLocal:
+			bytecode.all += (unsigned char)O_BinaryMultiplication;
+			bytecode.all += (unsigned char)O_PopOne;
+			return;
+
+		case O_BinaryDivisionAndStoreGlobal:
+		case O_BinaryDivisionAndStoreLocal:
+			bytecode.all += (unsigned char)O_BinaryDivision;
+			bytecode.all += (unsigned char)O_PopOne;
+			return;
+	}
+}
 
 //------------------------------------------------------------------------------
 bool WRCompilationContext::CheckSkipLoad( WROpcode opcode, WRBytecode& bytecode, int a, int o )
@@ -282,20 +502,20 @@ void WRCompilationContext::pushOpcode( WRBytecode& bytecode, WROpcode opcode )
 				bytecode.all[ a ] = (uint8_t)(be >> 8);
 				return;
 			}
-			else if ( bytecode.opcodes[o] == O_LiteralInt32 )
-			{
-				int32_t be = ((int32_t)bytecode.all[ a - 3 ])
-							 | ((int32_t)bytecode.all[ a - 2 ] << 8)
-							 | ((int32_t)bytecode.all[ a - 1 ] << 16)
-							 | ((int32_t)bytecode.all[ a ] << 24);
-				be = -be;
+				else if ( bytecode.opcodes[o] == O_LiteralInt32 )
+				{
+					uint32_t be = (uint32_t)bytecode.all[ a - 3 ]
+								| ((uint32_t)bytecode.all[ a - 2 ] << 8)
+								| ((uint32_t)bytecode.all[ a - 1 ] << 16)
+								| ((uint32_t)bytecode.all[ a ] << 24);
+					be = (uint32_t)(0u - be);
 
-				bytecode.all[ a - 3 ] = (uint8_t)(be & 0xFF);
-				bytecode.all[ a - 2 ] = (uint8_t)(be >> 8);
-				bytecode.all[ a - 1 ] = (uint8_t)(be >> 16);
-				bytecode.all[ a ] = (uint8_t)(be >> 24);
-				return;
-			}
+					bytecode.all[ a - 3 ] = (uint8_t)(be & 0xFF);
+					bytecode.all[ a - 2 ] = (uint8_t)(be >> 8);
+					bytecode.all[ a - 1 ] = (uint8_t)(be >> 16);
+					bytecode.all[ a ] = (uint8_t)(be >> 24);
+					return;
+				}
 			else if ( bytecode.opcodes[o] == O_LiteralFloat )
 			{
 				struct BE
@@ -979,6 +1199,18 @@ void WRCompilationContext::pushOpcode( WRBytecode& bytecode, WROpcode opcode )
 				bytecode.opcodes[o] = O_BLA;
 				return;
 			}
+			else if ( bytecode.opcodes[o] == O_LoadFromLocal )
+			{
+				bytecode.all[a - 1] = O_LocalBZ;
+				bytecode.opcodes[o] = O_LocalBZ;
+				return;
+			}
+			else if ( bytecode.opcodes[o] == O_LoadFromGlobal )
+			{
+				bytecode.all[a - 1] = O_GlobalBZ;
+				bytecode.opcodes[o] = O_GlobalBZ;
+				return;
+			}
 		}
 		else if ( opcode == O_PopOne )
 		{
@@ -1482,7 +1714,7 @@ void WRCompilationContext::appendBytecode( WRBytecode& bytecode, WRBytecode& add
 			bytecode.all += addMe.all[0];
 			bytecode.all += O_IndexSkipLoad;
 
-			bytecode.opcodes += O_LoadFromLocal;
+			bytecode.opcodes += O_LoadFromGlobal;
 			bytecode.opcodes += O_IndexSkipLoad;
 			return;
 		}
@@ -1497,7 +1729,7 @@ void WRCompilationContext::appendBytecode( WRBytecode& bytecode, WRBytecode& add
 			bytecode.all += addMe.all[0];
 			bytecode.all += O_IndexSkipLoad;
 
-			bytecode.opcodes += O_LoadFromLocal;
+			bytecode.opcodes += O_LoadFromGlobal;
 			bytecode.opcodes += O_IndexSkipLoad;
 			return;
 		}
@@ -1581,6 +1813,40 @@ void WRCompilationContext::appendBytecode( WRBytecode& bytecode, WRBytecode& add
 
 	bytecode.all += addMe.all;
 	bytecode.opcodes += addMe.opcodes;
+}
+
+//------------------------------------------------------------------------------
+void WRCompilationContext::FinalizeStatementBytecode( WRUnitContext& unit, WRBytecode& statementBytecode )
+{
+	pushOpcode( statementBytecode, O_PopOne );
+
+	WROverwriteStoreInfo currentStore;
+	bool haveCurrentStore = wr_findLastStatementOverwriteStore( statementBytecode, currentStore );
+	bool currentIsLiteralClobber = haveCurrentStore && wr_statementIsLiteralClobber( statementBytecode, currentStore );
+
+	if ( currentIsLiteralClobber
+		 && unit.lastStatementOverwriteStore.valid
+		 && unit.lastStatementOverwriteStore.global == currentStore.global
+		 && unit.lastStatementOverwriteStore.index == currentStore.index
+		 && (unit.lastStatementOverwriteStore.offset + unit.lastStatementOverwriteStore.length) == unit.bytecode.all.size() )
+	{
+		wr_dropLastStatementOverwriteStore( unit.bytecode, unit.lastStatementOverwriteStore );
+	}
+
+	unit.bytecode.opcodes.clear();
+
+	unsigned int statementOffset = unit.bytecode.all.size();
+	appendBytecode( unit.bytecode, statementBytecode );
+
+	if ( haveCurrentStore )
+	{
+		unit.lastStatementOverwriteStore = currentStore;
+		unit.lastStatementOverwriteStore.offset += statementOffset;
+	}
+	else
+	{
+		unit.lastStatementOverwriteStore.valid = false;
+	}
 }
 
 

@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2025 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -81,7 +81,7 @@ void wr_doIndexHash( WRValue* index, WRValue* value, WRValue* target )
 	}
 	else // naming an element of a struct "S.element"
 	{
-		if ( (target->r = wr_valueFromConfirmedStruct( value, hash )) )
+		if ( (target->r = wr_valueFromConfirmedStruct(value, hash)) )
 		{
 			target->p2 = INIT_AS_REF;
 		}
@@ -181,7 +181,11 @@ boundsFailed:
 				return;
 			}
 
-			wr_growValueArray( value->va, index->ui );
+			if ( !wr_growValueArray(value->va, index->ui) )
+			{
+				target->init();
+				return;
+			}
 		}
 
 		arrayElementToTarget( index->ui, target, value );

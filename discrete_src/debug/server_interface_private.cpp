@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2023 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT License
 
@@ -196,7 +196,7 @@ bool WRDebugServerInterfacePrivate::codewordEncountered( const uint8_t* pc, uint
 		entry->onLine = -1; // don't know yet!
 		entry->fromUnitIndex = from->thisUnitIndex;
 		entry->thisUnitIndex = codeword & WRD_PayloadMask;
-//		entry->stackOffset = stackTop - m_w->stack;
+		entry->stackOffset = (uint16_t)(stackTop - m_context->stack);
 
 		WRFunction* func = m_context->localFunctions + (entry->thisUnitIndex - 1); // unit '0' is the global unit
 		entry->arguments = func->arguments;
@@ -298,7 +298,7 @@ WRDRun:
 				
 				memcpy( m_externalCodeBlock, packet->payload(), size );
 				
-				m_parent->loadBytes( m_externalCodeBlock, m_externalCodeBlockSize );
+				m_parent->loadBytes( m_externalCodeBlock, size );
 			}
 			else
 			{
@@ -321,7 +321,7 @@ WRDRun:
 			}
 			else
 			{
-				uint32_t size = sizeof(WrenchPacket) + m_embeddedSourceLen + 1;
+				uint32_t size = m_embeddedSourceLen + 1;
 				reply = WrenchPacket::alloc( WRD_ReplySource, size );
 				uint32_t i=0;
 				for( ; i< m_embeddedSourceLen; ++i )
@@ -346,7 +346,7 @@ WRDRun:
 			}
 			else
 			{
-				uint32_t size = sizeof(WrenchPacket) + m_symbolBlockLen;
+				uint32_t size = m_symbolBlockLen;
 				reply = WrenchPacket::alloc( WRD_ReplySymbolBlock, size );
 				uint32_t i=0;
 				for( ; i < m_symbolBlockLen; ++i )
@@ -436,11 +436,12 @@ WRDRun:
 
 				for( WrenchCallStackEntry* E = m_callStack->first(); E; E = m_callStack->next() )
 				{
-					*pack = *E;
-					pack->onLine = wr_x32( pack->onLine );
-					pack->locals = wr_x16( pack->locals );
-					++pack;
-				}
+						*pack = *E;
+						pack->onLine = wr_x32( pack->onLine );
+						pack->locals = wr_x16( pack->locals );
+						pack->stackOffset = wr_x16( pack->stackOffset );
+						++pack;
+					}
 			}
 			
 			break;

@@ -1,7 +1,7 @@
 #ifndef _PACKET_H
 #define _PACKET_H
 /*******************************************************************************
-Copyright (c) 2023 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -76,7 +76,7 @@ struct WrenchPacket
 	void setPayloadSize( uint32_t newsize ) { size = sizeof(WrenchPacket) + newsize; }
 	uint32_t payloadSize() { return (size <= sizeof(WrenchPacket)) ? 0 : (size - sizeof(WrenchPacket)); }
 	uint8_t* payload( uint32_t offset =0 ) { return (uint8_t*)((char *)this + sizeof(WrenchPacket)) + offset; }
-	uint8_t operator[] ( const int offset ) { return *(uint8_t*)((char*)this + sizeof(WrenchPacket)) + offset; }
+	uint8_t operator[] ( const int offset ) { return *((uint8_t*)((char*)this + sizeof(WrenchPacket)) + offset); }
 	uint8_t* data() { return (uint8_t*)this; }
 	
 	WrenchPacket() {}

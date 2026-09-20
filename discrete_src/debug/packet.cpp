@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2024 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT License
 
@@ -39,6 +39,7 @@ WrenchPacket::WrenchPacket( const WrenchDebugComm type, const uint32_t payloadSi
 WrenchPacket::WrenchPacket( const int32_t type )
 {
 	memset( (char*)this, 0, sizeof(WrenchPacket) );
+	size = sizeof(WrenchPacket);
 	t = type;
 }
 
@@ -47,7 +48,7 @@ WrenchPacket* WrenchPacket::alloc( WrenchPacket const& base )
 {
 	WrenchPacket* packet = (WrenchPacket*)g_malloc( base.size );
 
-	memcpy( (char*)packet, (char*)&base, sizeof(WrenchPacket) );
+	memcpy( (char*)packet, (char*)&base, base.size );
 	return packet;
 }
 

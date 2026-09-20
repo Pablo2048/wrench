@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2024 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -148,12 +148,6 @@ void wr_formatStackEntry( const WRValue* v, WRstr& out )
 				case WR_EX_RAW_ARRAY:
 				{
 					out.appendFormat( "EX:RAW_ARRAY [%p] size[%d]\n", v->r->c, EX_RAW_ARRAY_SIZE_FROM_P2(v->r->p2));
-					break;
-				}
-
-				case WR_EX_DEBUG_BREAK:
-				{
-					out.appendFormat( "EX:DEBUG_BREAK\n" );
 					break;
 				}
 

@@ -1,7 +1,7 @@
 #ifndef _WRENCH_H
 #define _WRENCH_H
 /*******************************************************************************
-Copyright (c) 2025 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -28,10 +28,11 @@ SOFTWARE.
 #include <stddef.h>
 #include <string.h>
 #include <math.h>
+#include <assert.h>
 
-#define WRENCH_VERSION_MAJOR 6
-#define WRENCH_VERSION_MINOR 0
-#define WRENCH_VERSION_BUILD 19
+#define WRENCH_VERSION_MAJOR 7
+#define WRENCH_VERSION_MINOR 2
+#define WRENCH_VERSION_BUILD 2
 
 struct WRState;
 
@@ -82,8 +83,8 @@ architecture, see vm.h for the current definitions
  **** EXPERIMENTAL **** only very basic support is in place */
 //#define WRENCH_INCLUDE_DEBUG_CODE
 
-// the debugger works over a serial link, define the architecure this
-// side is being targetted for
+// the debugger works over a serial link, define the architecture this
+// side is being targeted for
 //#define WRENCH_WIN32_SERIAL
 //#define WRENCH_ARDUINO_SERIAL
 //#define WRENCH_LINUX_SERIAL
@@ -99,7 +100,9 @@ be more than enough.
 To really reduce RAM footprint this can be lowered considerably
 depending on usage. (consumes 8 bytes per stack entry)
 */
+#ifndef WRENCH_DEFAULT_STACK_SIZE
 #define WRENCH_DEFAULT_STACK_SIZE 64
+#endif
 // this costs a small bit of overhead whenever the stack is used, for
 // most applications it is not necessary, but will protect against
 // things like infinite recursion
@@ -117,7 +120,8 @@ instruction!
 // how many instructions each call to the VM executes before yielding,
 // set to '0' for unlimited (default)
 void wr_setInstructionsPerSlice( WRState* w, const int instructions );
-void wr_forceYield( WRState* w );  // for the VM to yield right NOW, (called from a different thread)
+void wr_forceYield( WRState* w );  // for the VM to yield right NOW
+int wr_slicesUsedLastCall( WRState* w );  // how many time slices did the last call to the VM use?
 #endif
 
 /************************************************************************
@@ -178,18 +182,18 @@ graceful exit
 Custom allocator:
 by default wrench uses malloc/free but if you want to use your own
 allocator it can be set up here
-NOTE: used for all RETURNED MEMORY AS WELL, such such asMallocString(...)!!!!
+NOTE: used for all RETURNED MEMORY AS WELL, such as asMallocString(...)!!!!
 */
 typedef void* (*WR_ALLOC)(size_t size);
 typedef void (*WR_FREE)(void* ptr);
 void wr_setGlobalAllocator( WR_ALLOC wralloc, WR_FREE wrfree );
 
-
 //------------------------------------------------------------------------------
 
 struct WRValue;
-struct WRContext;
 struct WRFunction;
+struct WRContext;
+class WRstr;
 
 //------------------------------------------------------------------------------
 // to minimize text segment size, only a minimum of strings
@@ -227,13 +231,14 @@ enum WRError
 	WR_ERR_new_assign_by_label_or_offset_not_both,
 	WR_ERR_struct_not_exported,
 	WR_ERR_empty_parens,
+	WR_ERR_blank_variables_cannot_be_initialized,
 
 	WR_ERR_run_must_be_called_by_itself_first,
 	WR_ERR_hash_table_size_exceeded,
 	WR_ERR_hash_table_invalid_key,
 	WR_ERR_wrench_function_not_found,
 	WR_ERR_array_must_be_indexed,
-	WR_ERR_context_not_found,
+	WR_ERR_scontext_not_found,
 	WR_ERR_context_not_yielded,
 	WR_ERR_cannot_call_function_context_yielded,
 
@@ -274,7 +279,7 @@ enum WRError
 /***************************************************************/
 //                       State Management
 
-// create/destroy a WRState object that can run multiple contexts/threads
+// create/destroy a WRState object that can run multiple contexts
 WRState* wr_newState( int stackSize =WRENCH_DEFAULT_STACK_SIZE );
 void wr_destroyState( WRState* w );
 
@@ -284,9 +289,17 @@ void* wr_malloc( size_t size );
 void wr_free( void* ptr );
 
 // hashing function used inside wrench, it's a stripped down murmer,
-// not techcnically the "best" but very good, very fast and very compact
+// not technically the "best" but very good, very fast and very compact
 uint32_t wr_hash( const void* dat, const int len, uint32_t serial=0 );
 uint32_t wr_hashStr( const char* dat, uint32_t serial=0 );
+
+// set a context void* that all function callbacks will have access
+// to through context->w->ctx
+//         or context->ctxLocal;
+inline void wr_setStateContext( WRState* w, void* ctx );
+inline void wr_setLocalContext( WRContext* c, void* ctx );
+inline void* wr_getStateContext( WRState* w );
+inline void* wr_getLocalContext( WRContext* c );
 
 /***************************************************************/
 /**************************************************************/
@@ -315,10 +328,15 @@ WRError wr_compile( const char* source,
 					const int size,
 					unsigned char** out,
 					int* outLen,
-					char* errMsg =0,
+					WRstr* errMsg =0,
 					const uint8_t compilerOptionFlags = WR_INCLUDE_GLOBALS );
 
-// disassemble the bytecode and output humanm readable
+// is this a valid bytecode image for this version? Optionally return
+// the hash signature
+bool wr_isBytecodeValid( const uint8_t* bytecode, const unsigned int len, uint32_t* hash =0 );
+
+// disassemble the bytecode and output human readable
+void wr_disassemble( const uint8_t* bytecode, const unsigned int len, WRstr& out, const bool includeComments =true );
 void wr_disassemble( const uint8_t* bytecode, const unsigned int len, char** out, unsigned int* outLen =0 );
 
 // w:          state (see wr_newState)
@@ -365,7 +383,7 @@ WRValue* wr_executeContext( WRContext* context );
 // after wr_run() this allows any function in the script to be
 // called with the given arguments, returning a single value
 //
-// contexd:      the context in which the function was loaded
+// context:      the context in which the function was loaded
 // functionName: plaintext name of the function to be called
 // argv:         array of WRValues to call the function with (optional)
 // argn:         how many arguments argv contains (optional, but if
@@ -376,36 +394,44 @@ WRValue* wr_executeContext( WRContext* context );
 // If the context is yielded, callFunction(...) will always continue
 // where the yielded function left off and ignore any parameters
 
-WRValue* wr_callFunction( WRContext* context, const char* functionName, const WRValue* argv =0, const int argn =0 );
-
 // exactly the same as the above but the hash is supplied directly to
-// save compute time, us wr_hashStr(...) to obtain the hash of the
+// save compute time, use wr_hashStr(...) to obtain the hash of the
 // functionName
-WRValue* wr_callFunction( WRContext* context, const int32_t hash, const WRValue* argv =0, const int argn =0 );
+// NOTE: You CAN call library functions through this interface as well!
+       WRValue* wr_callFunction( WRContext* context, const int32_t hash, const WRValue* argv =0, const int argn =0 );
+inline WRValue* wr_callFunction( WRContext* context, const char* functionName, const WRValue* argv =0, const int argn =0 ) { return wr_callFunction( context, wr_hashStr(functionName), argv, argn ); }
 
 // The raw function pointer can be pre-loaded with wr_getFunction() and
 // and then called with an absolute minimum of overhead
 WRValue* wr_callFunction( WRContext* context, WRFunction* function, const WRValue* argv =0, const int argn =0 );
 
-// Continue a yielded context.
-// if context is NOT yielded this will return null will err
-// "WR_ERR_context_not_yielded"
-WRValue* wr_continue( WRContext* context );
-
-// If the function is yielded, this returns true and provides the
-// argument list that was passed to yield(...), if requested
-// returns false if this context is not yielded
-bool wr_getYieldInfo( WRContext* context, int* args =0, WRValue** firstArg =0, WRValue** returnValue =0 );
-
-// after wrench executes it may have set an error code, this is how to
-// retreive it. This sytems is coarse at the moment. Re-entering the
-// interpreter clears the last error
-WRError wr_getLastError( WRState* w );
-
 // once wr_run() is called the returned context object can be used to
 // pre-fetch a function pointer. This reduces the overhead of calling
 // that function to almost nothing.
-WRFunction* wr_getFunction( WRContext* context, const char* functionName );
+// THIS DOES NOT WORK FOR LIBRARY FUNCTIONS.
+       WRFunction* wr_getFunction( WRContext* context, const uint32_t functionHash );
+inline WRFunction* wr_getFunction( WRContext* context, const char* functionName ) { return wr_getFunction(context, wr_hashStr(functionName)); }
+
+// Continue a yielded context.
+// Return value semantics:
+//   non-null : script reached return/stop; pointer is the script return value
+//   null     : script yielded again (check wr_getYieldInfo()), or error
+// If context is NOT yielded this sets:
+//   "WR_ERR_context_not_yielded"
+WRValue* wr_continue( WRContext* context );
+
+// If this context in in a yielded state, return true, otherwise false
+// args : will be pointed to the first arg yield(...) pushed
+// argn : number of args yield(...) pushed
+// returnValue : pointer to the return value yield(...) will have (default 0)
+// if the function was forcibly yielded there will be no args and the
+// return value will be ignored
+bool wr_getYieldInfo( WRContext* context, WRValue** args =0, int* argnum =0, WRValue** returnValue =0);
+
+// after wrench executes it may have set an error code, this is how to
+// retrieve it. This system is coarse at the moment. Re-entering the
+// interpreter clears the last error
+WRError wr_getLastError( WRState* w );
 
 // want direct access to a global? okay then, if the code was compiled
 // with symbols (see compile(...) suite) then this will give you a
@@ -415,14 +441,14 @@ WRValue* wr_getGlobalRef( WRContext* context, const char* label );
 // Destroy a context you no longer need and free up all the memory it
 // was using
 // NOTE: all contexts ARE AUTOMATICALLY FREED when wr_destroyState(...)
-//       is called, it it NOT necessary to call this on each context
+//       is called, it is NOT necessary to call this on each context
 void wr_destroyContext( WRContext* context );
 
 // how many bytes of memory must be allocated before the gc will run, default
 // set here, can be adjusted at runtime with the
 // wr_setAllocatedMemoryGCHint()
 #define WRENCH_DEFAULT_ALLOCATED_MEMORY_GC_HINT 4000
-void wr_setAllocatedMemoryGCHint( WRState* w, const uint16_t bytes );
+void wr_setAllocatedMemoryGCHint( WRState* w, const uint32_t bytes );
 
 /***************************************************************/
 /***************************************************************/
@@ -438,14 +464,22 @@ void wr_setAllocatedMemoryGCHint( WRState* w, const uint16_t bytes );
 // retVal:        this value will be passed back, default: integer zero
 // usr:           opaque pointer function was registered with
 typedef void (*WR_C_CALLBACK)(WRContext* c, const WRValue* argv, const int argn, WRValue& retVal, void* usr );
+typedef void (*WR_C_CALLBACK_NOT_FOUND)( const uint32_t Signature, WRContext* c, const WRValue* argv, const int argn, WRValue& retVal, void* usr );
+
+// if the callback is not found, wrench throws a
+// WR_ERR_function_not_found error, but if this is defined, it calls
+// this instead and continues executing
+inline void wr_setOnCallbackNotFound( WRState* w, WR_C_CALLBACK_NOT_FOUND onCallbackNotFound );
+
 
 // IMPORTANT: The values passed may be references (keepin' it real) so
 // always use the getters inside the WRValue class:
 
-// int:    .asInt();
-// float:  .asFloat();
-// binary: .array( unsigned int* size, char* type );
-// string: .c_str( unsigned int* len );
+// int:      .asInt();
+// float:    .asFloat();
+// uint32_t: .asHash();
+// binary:   .array( unsigned int* size, char* type );
+// string:   .c_str( unsigned int* len );
 
 // tests:
 // .isFloat() fast check if this is a float
@@ -453,13 +487,13 @@ typedef void (*WR_C_CALLBACK)(WRContext* c, const WRValue* argv, const int argn,
 // .isString() fast check if this is a string
 
 
-// this will do its pest to represent the value as a string to the
+// this will do its best to represent the value as a string to the
 // supplied buffer, len is maximum size allowed
 // string: .asString(char* string, size_t len )
 
 // w:        state to register with (will be available to all contexts)
 // name:     name of the function
-// function: callback (see typdef above)
+// function: callback (see typedef above)
 // usr:      opaque pointer that will be passed to the callback (optional)
 void wr_registerFunction( WRState* w, const char* name, WR_C_CALLBACK function, void* usr =0 );
 
@@ -490,11 +524,17 @@ bool wr_deserialize( WRContext* context, WRValue& value, const char* buf, const 
 // stackTop - (N-1) : [arg2]
 // stackTop - N     : [arg1]
 typedef void (*WR_LIB_CALLBACK)( WRValue* stackTop, const int argn, WRContext* context );
+typedef void (*WR_LIB_CALLBACK_NOT_FOUND)( const uint32_t Signature, WRValue* stackTop, const int argn, WRContext* context );
+
+// if the library callback is not found, wrench throws a
+// WR_ERR_lib_function_not_found error, but if this is defined, it calls
+// this instead and continues executing
+inline void wr_setOnLibCallbackNotFound( WRState* w, WR_LIB_CALLBACK_NOT_FOUND onLibCallbackNotFound );
 
 // w:         state to register with (will be available to all contexts)
 // signature: library signature must be in the form of <lib>::<name>
 //            ex: "math::cos"
-// function:  callback (see typdef above)
+// function:  callback (see typedef above)
 void wr_registerLibraryFunction( WRState* w, const char* signature, WR_LIB_CALLBACK function );
 void wr_registerLibraryConstant( WRState* w, const char* signature, const int32_t i );
 void wr_registerLibraryConstant( WRState* w, const char* signature, const float f );
@@ -511,7 +551,7 @@ void wr_loadIOLib( WRState* w ); // IO funcs (time/file/io)
 void wr_loadStringLib( WRState* w ); // string functions
 void wr_loadMessageLib( WRState* w ); // messaging between contexts
 void wr_loadSerializeLib( WRState* w ); // serialize WRValues to and from binary
-void wr_loadDebugLib( WRState* w ); // debuger-interact functions
+void wr_loadDebugLib( WRState* w ); // debugger interaction functions
 void wr_loadTCPLib( WRState* w ); // TCP/IP functions
 void wr_loadContainerLib( WRState* w ); // array/hash/queue/stack/list
 
@@ -537,11 +577,11 @@ void wr_loadArduinoLCDLib( WRState* w );
 // heap will be harmed
 
 // load a value up and make it ready for calling a function
-WRValue& wr_makeInt( WRValue* val, int i );
-WRValue& wr_makeFloat( WRValue* val, float f );
-
 // a string has to exist in a context so it can be worked with
+// ALSO can use the WRValue methods 'set...' directly
 WRValue& wr_makeString( WRContext* context, WRValue* val, const char* data, const int len =0 );
+inline WRValue& wr_makeInt( WRValue* val, int i );
+inline WRValue& wr_makeFloat( WRValue* val, float f );
 
 // turning a value into a container,
 // NOTE!! Allocates a hash table which must be released with destroy!!
@@ -704,8 +744,8 @@ enum WRExType : uint8_t
 
 	WR_EX_RAW_ARRAY  = 0x20,  // 0010
 
-	WR_EX_LL_POINTER = 0x40,  // 0100  [experimental]
-	
+//	0x40 unused
+
 	WR_EX_ITERATOR	       = 0x60,  // 0110
 	WR_EX_CONTAINER_MEMBER = 0x80,  // 1000
 	WR_EX_ARRAY            = 0xA0,  // 1010
@@ -713,6 +753,14 @@ enum WRExType : uint8_t
 	// see EXPECTS_HASH_INDEX!!
 	WR_EX_STRUCT     = 0xC0,  // 1100
 	WR_EX_HASH_TABLE = 0xE0,  // 1110
+};
+
+//------------------------------------------------------------------------------
+enum WRGCFlags
+{
+	GCFlag_NoContext = 1<<0,
+	GCFlag_Marked = 1<<1,
+	GCFlag_Perm = 1<<2,
 };
 
 //------------------------------------------------------------------------------
@@ -765,20 +813,24 @@ struct WRIteratorEntry
 struct WRValue
 {
 	WRValue( int val ) { init(val); }
-	WRValue( float val ) { init((int)val); }
+	WRValue( float val ) { init(val); }
 
 	WRValue* init() { p = 0; p2 = WR_INT; return this; }
 	WRValue* init( int val ) { i = val; p2 = WR_INT; return this; }
-	//WRValue* init( float val ) { f = val; p2 = WR_FLOAT; return this; }
+	WRValue* init( float val ) { f = val; p2 = WR_FLOAT; return this; }
 
 	// never reference the data members directly, they are unions and
 	// bad things will happen. Always access them with one of these
 	// methods
 	int asInt() const;
-	void setInt( const int val );
-	
 	float asFloat() const;
-	void setFloat( const float val );
+
+	// setting this value, do any extra work required. Note that
+	// setString() requires a context, since the string is actually a
+	// created array that needs to be referenced
+	void setString( WRContext* context, const char* data, const int len =0 ) { wr_makeString(context, this, data, len); }
+	void setFloat( const float F ) { wr_makeFloat(this, F); }
+	void setInt( const int I ) { wr_makeInt(this, I); }
 
 	bool isFloat() const {return type == WR_FLOAT || (type == WR_REF && r->type == WR_FLOAT); }
 	bool isInt() const { return type == WR_INT || (type == WR_REF && r->type == WR_INT); }
@@ -930,6 +982,51 @@ public:
 };
 
 //------------------------------------------------------------------------------
+inline WRValue& wr_makeInt( WRValue* val, int i ) { return *(val->init( i )); }
+inline WRValue& wr_makeFloat( WRValue* val, float f ) { return *(val->init( f )); }
+
+//------------------------------------------------------------------------------
+class WRGCBase
+{
+public:
+
+	// the order here matters for data alignment
+
+#if (__cplusplus <= 199711L)
+	int8_t m_type;
+#else
+	WRGCObjectType m_type;
+#endif
+
+	int8_t m_flags;
+
+	union
+	{
+		uint16_t m_mod;
+		uint16_t m_hashItem;
+	};
+
+	union
+	{
+		void* m_data;
+		char* m_SCdata;
+		unsigned char* m_Cdata;
+		WRValue* m_Vdata;
+		WRGCBase* m_referencedTable;
+	};
+
+	WRGCBase* m_nextGC;
+
+	void clear()
+	{
+		if ( m_type >= SV_VALUE )
+		{
+			g_free( m_Cdata );
+		}
+	}
+};
+
+//------------------------------------------------------------------------------
 // Helper class to represent a wrench value, in all cases it does NOT
 // manage the memory, but relies on a WRContext to do that
 class WrenchValue
@@ -937,7 +1034,7 @@ class WrenchValue
 public:
 		
 	WrenchValue( WRContext* context, const char* label ) : m_context(context), m_value( wr_getGlobalRef(context, label) ) {}
-	WrenchValue( WRContext* context, WRValue* value ) : m_context(context), m_value(&(value->deref())) {}
+	WrenchValue( WRContext* context, WRValue* value ) : m_context(context), m_value(value ? &(value->deref()) : 0) {}
 
 	bool isValid() const { return m_value ? true : false; }
 
@@ -953,6 +1050,13 @@ public:
 	WRValue& operator[] ( const int index ) { return *asArrayMember( index ); }
 	WRValue* asArrayMember( const int index );
 	int arraySize() const { return m_value ? m_value->arraySize() : -1; } // returns -1 if this is not an array
+
+	// IMPORTANT: the returned pointers refer to internal storage in the hash
+	// table and can become stale if the hash table grows/re-hashes; reacquire
+	// with getHashTableValue() after modifications.
+	// convert this value to a hash table (if needed) and create key entry
+	WRValue* addHashTableValue( const char* key );
+	WRValue* getHashTableValue( const char* key ); // return null if not found or this is not a hash table
 
 private:
 	WRContext* m_context;
@@ -979,11 +1083,132 @@ public:
 	int addThread( const uint8_t* byteCode, const int size, const int instructionsThisSlice =1000, const bool takeOwnership =false );
 	bool removeTask( const int taskId );
 
+	int lastErr() const { return m_lastErr; }       // WRError of last faulted task, 0 if none
+	int lastErrTaskId() const { return m_lastErrId; } // id of the task that faulted
+	void clearErr() { m_lastErr = 0; m_lastErrId = 0; }
+
 private:
 	WRState* m_w;
 	WrenchScheduledTask* m_tasks;
+	int m_lastErr;
+	int m_lastErrId;
 };
 #endif
+
+//------------------------------------------------------------------------------
+class WRGCObject : public WRGCBase
+{
+public:
+
+	uint32_t m_size;
+	union
+	{
+		uint32_t* m_hashTable;
+		const uint8_t* m_ROMHashTable;
+		WRContext* m_creatorContext;
+	};
+
+	int init( const unsigned int size, const WRGCObjectType type, bool clear );
+	
+	WRValue* getAsRawValueHashTable( const uint32_t hash, int* index =0 );
+	
+	WRValue* exists( const uint32_t hash, bool removeIfPresent );
+	
+	void* get( const uint32_t l, int* index =0 );
+	
+	uint32_t growHash( const uint32_t hash, const uint16_t sizeHint =0, int* sizeAllocated =0 );
+	uint32_t getIndexOfHit( const uint32_t hash, const bool inserting );
+
+private:
+
+	WRGCObject& operator= ( WRGCObject& A );
+	WRGCObject(WRGCObject& A);
+};
+
+
+class WRDebugServerInterface;
+
+//------------------------------------------------------------------------------
+struct WRContext
+{
+	uint16_t globals;
+
+	uint32_t allocatedMemoryHint; // _approximately_ how much memory has been allocated since last gc
+
+	const unsigned char* bottom;
+	const unsigned char* codeStart;
+	int32_t bottomSize;
+
+	void* ctxLocal; // user value assigned with this context, opaque to wrench
+
+	WRValue* stack;
+
+	const unsigned char* stopLocation;
+
+	WRGCBase* svAllocated;
+
+#ifdef WRENCH_INCLUDE_DEBUG_CODE
+	WRDebugServerInterface* debugInterface;
+#endif
+
+	WRState* w;
+
+	WRGCObject registry; // the 'next' pointer in this registry is used as the context LL next
+
+	const unsigned char* yield_pc;
+	WRValue* yield_stackTop;
+	WRValue* yield_frameBase;
+	const WRValue* yield_argv;
+	uint8_t yield_argn;
+	uint8_t yieldArgs;
+	uint16_t stackOffset;
+
+	WRFunction* localFunctions;
+	uint8_t numLocalFunctions;
+
+	uint8_t flags;
+
+	WRContext* imported; // linked list of contexts this one imported
+
+	WRContext* nextStateContextLink;
+
+	void markBase( WRGCBase* svb );
+	void mark( WRValue* s );
+	void gc( WRValue* stackTop );
+
+	WRGCObject* getSVA( int size, WRGCObjectType type, bool init );
+};
+
+struct WRLibraryCleanup;
+
+//------------------------------------------------------------------------------
+struct WRState
+{
+#ifdef WRENCH_TIME_SLICES
+	int instructionsPerSlice;
+	int sliceInstructionCount;
+	int yieldEnabled;
+	int lastSlicesUsed;
+#endif
+
+	WRContext* contextList;
+
+	WRLibraryCleanup* libCleanupFunctions;
+
+	WRGCObject globalRegistry;
+
+	void* ctx; // state-wide context pointer, opaque to wrench
+
+	uint32_t allocatedMemoryLimit; // WRENCH_DEFAULT_ALLOCATED_MEMORY_GC_HINT by default
+	uint16_t stackSize; // how much stack to give each context
+	uint8_t err;
+
+	WR_C_CALLBACK_NOT_FOUND onCallbackNotFound;
+	WR_LIB_CALLBACK_NOT_FOUND onLibCallbackNotFound;
+};
+
+inline void wr_setOnCallbackNotFound( WRState* w, WR_C_CALLBACK_NOT_FOUND onCallbackNotFound ) { w->onCallbackNotFound = onCallbackNotFound; }
+inline void wr_setOnLibCallbackNotFound( WRState* w, WR_LIB_CALLBACK_NOT_FOUND onLibCallbackNotFound ) { w->onLibCallbackNotFound = onLibCallbackNotFound; }
 
 #define WRENCH_NULL_HASH 0xABABABAB  // -1414812757 / -1.2197928214371934e-12, can't be zero since we use int/floats as their own hash
 
@@ -993,9 +1218,8 @@ private:
 #endif
 
 struct WrenchPacket;
-class WRDebugServerInterface;
-class WRDebugServerInterfacePrivate;
 class WRDebugClientInterfacePrivate;
+class WRDebugServerInterfacePrivate;
 class WrenchDebugCommInterface;
 template<class> class SimpleLL;
 
@@ -1024,13 +1248,13 @@ struct WrenchFunction
 struct WrenchCallStackEntry
 {
 	int32_t onLine;
+	uint16_t stackOffset;
 
 	uint8_t fromUnitIndex;
 	uint8_t thisUnitIndex;
 	uint16_t locals;
 
 	uint8_t arguments;
-	uint8_t stackOffset;
 };
 
 //------------------------------------------------------------------------------
@@ -1120,15 +1344,773 @@ public:
 #ifdef WRENCH_CLI_DEBUG
 extern WRContext* g_context;
 #endif
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <ctype.h>
+
+//------------------------------------------------------------------------------
+inline void wr_setStateContext( WRState* w, void* ctx ) { w->ctx = ctx; }
+inline void wr_setLocalContext( WRContext* c, void* ctx ) { c->ctxLocal = ctx; }
+inline void* wr_getStateContext( WRState* w ) { return w->ctx; }
+inline void* wr_getLocalContext( WRContext* c ) { return c->ctxLocal; }
+
+#ifdef STR_FILE_OPERATIONS
+#include <sys/stat.h>
+#endif
+
+#if __cplusplus > 199711L
+#define STR_COPY_ARG
+#endif
+
+// same as str.h but for char only so no template overhead, also no
+// new/delete just malloc/free
+
+const unsigned int c_sizeofBaseString = 15; // this lib tries not to use dynamic RAM unless it has to
+const int c_formatBaseTrySize = 80;
+
+//-----------------------------------------------------------------------------
+class WRstr
+{
+public:
+	WRstr() { m_smallbuf[m_len = 0] = 0 ; m_str = m_smallbuf; m_buflen = c_sizeofBaseString; }
+	WRstr( const WRstr& str) { m_len = 0; m_str = m_smallbuf; m_buflen = c_sizeofBaseString; set(str, str.size()); } 
+	WRstr( const WRstr* str ) { m_len = 0; m_str = m_smallbuf; m_buflen = c_sizeofBaseString; if ( str ) { set(*str, str->size()); } } 
+	WRstr( const char* s, const unsigned int len ) { m_len = 0; m_str = m_smallbuf; m_buflen = c_sizeofBaseString; set(s, len); }
+	WRstr( const char* s ) { m_len = 0; m_str = m_smallbuf; m_buflen = c_sizeofBaseString; set(s, (unsigned int)strlen(s)); }
+	WRstr( const char c ) { m_len = 1; m_str = m_smallbuf; m_smallbuf[0] = c; m_smallbuf[1] = 0; m_buflen = c_sizeofBaseString; } 
+
+#ifdef STR_FILE_OPERATIONS
+	inline bool fileToBuffer( const char* fileName, const bool appendToBuffer =false );
+	inline bool bufferToFile( const char* fileName, const bool append =false ) const;
+#else
+	bool fileToBuffer( const char* fileName, const bool appendToBuffer =false ) { return false; }
+	bool bufferToFile( const char* fileName, const bool append =false ) const { return false; }
+#endif
+
+	WRstr& clear() { m_str[m_len = 0] = 0; return *this; }
+#ifdef STR_COPY_ARG
+	WRstr& format( const char* format, ... ) { va_list arg; va_start( arg, format ); clear(); appendFormatVA( format, arg ); va_end( arg ); return *this; }
+	WRstr& formatVA( const char* format, va_list arg ) { clear(); return appendFormatVA(format, arg); }
+	WRstr& appendFormat( const char* format, ... ) { va_list arg; va_start( arg, format ); appendFormatVA( format, arg ); va_end( arg ); return *this; }
+	inline WRstr& appendFormatVA( const char* format, va_list arg );
+#else
+	inline WRstr& format( const char* format, ... );
+	inline WRstr& appendFormat( const char* format, ... );
+#endif
+
+	inline void release( char** toBuf, unsigned int* len =0 ); // always suceeds and returns dynamic memory
+	inline WRstr& giveOwnership( char* str, const unsigned int len );
+
+	static const unsigned int npos = (unsigned int)-1;
+	unsigned int find( const char c, const unsigned int from =0 ) const { char buf[2] = { c, 0 }; return find(buf, from); }
+	unsigned int rfind( const char c, const unsigned int from =npos ) const { char buf[2] = { c, 0 }; return rfind(buf, from); }
+	unsigned int findCase( const char c, const unsigned int from =0 ) const { char buf[2] = { c, 0 }; return findCase(buf, from); }
+	inline unsigned int find( const char* str, const unsigned int from =0 ) const;
+	inline unsigned int rfind( const char* str, const unsigned int from =npos ) const;
+	inline unsigned int findCase( const char* str, const unsigned int from =0 ) const;
+
+	WRstr& setSize( const unsigned int size, const bool preserveContents =true ) { alloc(size, preserveContents); m_len = size; m_str[size] = 0; return *this; }
+
+	inline WRstr& alloc( const unsigned int characters, const bool preserveContents =true );
+
+	inline WRstr& trim();
+	inline WRstr& truncate( const unsigned int newLen ); // reduce size to 'newlen'
+	WRstr& shave( const unsigned int e ) { return (e > m_len) ? clear() : truncate(m_len - e); } // remove 'x' trailing characters
+	inline WRstr& shift( const unsigned int from );
+	inline WRstr substr( const unsigned int begin, const unsigned int len ) const;
+
+	unsigned int size() const { return m_len; } // see length
+
+	const char* c_str( const unsigned int offset =0 ) const { return m_str + offset; }
+	char* p_str( const unsigned int offset =0 ) const { return m_str + offset; }
+
+	operator const void*() const { return m_str; }
+	operator const char*() const { return m_str; }
+
+	WRstr& set( const char* buf, const unsigned int len ) { m_len = 0; m_str[0] = 0; return insert( buf, len ); }
+	WRstr& set( const WRstr& str ) { return set( str.m_str, str.m_len ); }
+	WRstr& set( const char c ) { clear(); m_str[0]=c; m_str[1]=0; m_len = 1; return *this; }
+
+	bool isMatch( const char* buf ) const { return strcmp(buf, m_str) == 0; }
+#ifdef _WIN32
+	bool isMatchCase( const char* buf ) const { return _strnicmp(buf, m_str, m_len) == 0; }
+#else
+	bool isMatchCase( const char* buf ) const { return strncasecmp(buf, m_str, m_len) == 0; }
+#endif
+	static inline bool isWildMatch( const char* pattern, const char* haystack );
+	inline bool isWildMatch( const char* pattern ) const { return isWildMatch( pattern, m_str ); }
+				  
+	static inline bool isWildMatchCase( const char* pattern, const char* haystack );
+	inline bool isWildMatchCase( const char* pattern ) const { return isWildMatchCase( pattern, m_str ); }
+
+	inline WRstr& insert( const char* buf, const unsigned int len, const unsigned int startPos =0 );
+	inline WRstr& insert( const WRstr& s, const unsigned int startPos =0 ) { return insert(s.m_str, s.m_len, startPos); }
+
+	inline WRstr& append( const char* buf, const unsigned int len ) { return insert(buf, len, m_len); } 
+	inline WRstr& append( const char c );
+	inline WRstr& append( const WRstr& s ) { return insert(s.m_str, s.m_len, m_len); }
+
+	// define the usual suspects:
+
+	const char& operator[]( const int l ) const { return get((unsigned int)l); }
+	const char& operator[]( const unsigned int l ) const  { return get(l); }
+	char& operator[]( const int l )  { return get((unsigned int)l); }
+	char& operator[]( const unsigned int l ) { return get(l); }
+
+	char& get( const unsigned int l ) { return m_str[l]; }
+	const char& get( const unsigned int l ) const { return m_str[l]; }
+
+	WRstr& operator += ( const WRstr& str ) { return append(str.m_str, str.m_len); }
+	WRstr& operator += ( const char* s ) { return append(s, (unsigned int)strlen(s)); }
+	WRstr& operator += ( const char c ) { return append(c); }
+
+	WRstr& operator = ( const WRstr& str ) { if ( &str != this ) set(str, str.size()); return *this; }
+	WRstr& operator = ( const WRstr* str ) { if ( !str ) { clear(); } else if ( this != str ) { set(*str, str->size()); } return *this; }
+	WRstr& operator = ( const char* c ) { set(c, (unsigned int)strlen(c)); return *this; }
+	WRstr& operator = ( const char c ) { set(&c, 1); return *this; }
+
+	friend bool operator == ( const WRstr& s1, const WRstr& s2 ) { return s1.m_len == s2.m_len && (strncmp(s1.m_str, s2.m_str, s1.m_len) == 0); }
+	friend bool operator == ( const char* z, const WRstr& s ) { return s.isMatch( z ); }
+	friend bool operator == ( const WRstr& s, const char* z ) { return s.isMatch( z ); }
+	friend bool operator != ( const WRstr& s1, const WRstr& s2 ) { return s1.m_len != s2.m_len || (strncmp(s1.m_str, s2.m_str, s1.m_len) != 0); }
+	friend bool operator != ( const WRstr& s, const char* z ) { return !s.isMatch( z ); }
+	friend bool operator != ( const char* z, const WRstr& s ) { return !s.isMatch( z ); }
+	friend bool operator != ( const WRstr& s, char* z ) { return !s.isMatch( z ); }
+	friend bool operator != ( char* z, const WRstr& s ) { return !s.isMatch( z ); }
+
+	friend WRstr operator + ( const WRstr& str, const char* s) { WRstr T(str); T += s; return T; }
+	friend WRstr operator + ( const WRstr& str, const char c) { WRstr T(str); T += c; return T; }
+	friend WRstr operator + ( const char* s, const WRstr& str ) { WRstr T(s, (unsigned int)strlen(s)); T += str; return T; }
+	friend WRstr operator + ( const char c, const WRstr& str ) { WRstr T(c); T += str; return T; }
+	friend WRstr operator + ( const WRstr& str1, const WRstr& str2 ) { WRstr T(str1); T += str2; return T; }
+
+	~WRstr() { if ( m_str != m_smallbuf ) g_free(m_str); }
+
+protected:
+
+	operator char*() const { return m_str; } // prevent accidental use
+
+	char *m_str; // first element so if the class is cast as a C and de-referenced it always works
+
+	unsigned int m_buflen; // how long the buffer itself is
+	unsigned int m_len; // how long the string is in the buffer
+	char m_smallbuf[ c_sizeofBaseString + 1 ]; // small temporary buffer so a malloc/free is not imposed for small strings
+};
+
+//------------------------------------------------------------------------------
+unsigned int WRstr::rfind( const char* str, const unsigned int from ) const
+{
+	int f = (int)(from > m_len ? m_len : from);
+	if ( !str || !str[0] )
+	{
+		return 0;
+	}
+
+	for( ; f >= 0; --f )
+	{
+		for( int i=0;;++i )
+		{
+			if ( !str[i] )
+			{
+				return f;
+			}
+			if ( str[i] != m_str[f + i] )
+			{
+				break;
+			}
+		}
+	}
+	return npos;
+}
+
+//------------------------------------------------------------------------------
+unsigned int WRstr::find( const char* str, const unsigned int from ) const
+{
+	unsigned int f = from > m_len ? 0 : from;
+	if ( !str || !str[0] )
+	{
+		return 0;
+	}
+
+	for( ; f < m_len; ++f )
+	{
+		for( int i=0;;++i )
+		{
+			if ( !str[i] )
+			{
+				return f;
+			}
+
+			char c = m_str[f + i];
+			if ( !c )
+			{
+				return npos;
+			}
+
+			if ( str[i] != c )
+			{
+				break;
+			}
+		}
+	}
+	return npos;
+}
+
+//------------------------------------------------------------------------------
+unsigned int WRstr::findCase( const char* str, const unsigned int from ) const
+{
+	unsigned int f = from > m_len ? 0 : from;
+	if ( !str || !str[0] )
+	{
+		return 0;
+	}
+
+	for( ; f < m_len; ++f )
+	{
+		for( int i=0;;++i )
+		{
+			if ( !str[i] )
+			{
+				return f;
+			}
+
+			char c = m_str[f + i];
+			if ( !c )
+			{
+				return npos;
+			}
+
+			if ( tolower(str[i]) != tolower(c) )
+			{
+				break;
+			}
+		}
+	}
+	return npos;
+}
+
+#ifdef STR_FILE_OPERATIONS
+//-----------------------------------------------------------------------------
+bool WRstr::fileToBuffer( const char* fileName, const bool appendToBuffer )
+{
+	if ( !fileName )
+	{
+		return false;
+	}
+
+#ifdef _WIN32
+	struct _stat sbuf;
+	int ret = _stat( fileName, &sbuf );
+#else
+	struct stat sbuf;
+	int ret = stat( fileName, &sbuf );
+#endif
+
+	if ( ret != 0 )
+	{
+		return false;
+	}
+
+	FILE *infil = fopen( fileName, "rb" );
+	if ( !infil )
+	{
+		return false;
+	}
+
+	if ( appendToBuffer )
+	{
+		alloc( sbuf.st_size + m_len, true );
+		m_str[ sbuf.st_size + m_len ] = 0;
+		ret = (int)fread( m_str + m_len, sbuf.st_size, 1, infil );
+		m_len += sbuf.st_size;
+	}
+	else
+	{
+		alloc( sbuf.st_size, false );
+		m_len = sbuf.st_size;
+		m_str[ m_len ] = 0;
+		ret = (int)fread( m_str, m_len, 1, infil );
+	}
+
+	fclose( infil );
+	return ret == 1;
+}
+
+//-----------------------------------------------------------------------------
+bool WRstr::bufferToFile( const char* fileName, const bool append) const
+{
+	if ( !fileName )
+	{
+		return false;
+	}
+
+	FILE *outfil = append ? fopen( fileName, "a+b" ) : fopen( fileName, "wb" );
+	if ( !outfil )
+	{
+		return false;
+	}
+
+	int ret = (int)fwrite( m_str, m_len, 1, outfil );
+	fclose( outfil );
+
+	return (m_len == 0) || (ret == 1);
+}
+#endif
+
+//-----------------------------------------------------------------------------
+void WRstr::release( char** toBuf, unsigned int* len )
+{
+	if ( len )
+	{
+		*len = m_len;
+	}
+	
+	if ( !m_len )
+	{
+		*toBuf = 0;
+	}
+	else if ( m_str == m_smallbuf )
+	{
+		*toBuf = (char*)g_malloc( m_len + 1 );
+		memcpy( *toBuf, m_str, m_len + 1 );
+	}
+	else
+	{
+		*toBuf = m_str;
+		m_str = m_smallbuf;
+		m_buflen = c_sizeofBaseString;
+	}
+
+	m_len = 0;
+	m_str[0] = 0;
+}
+
+//-----------------------------------------------------------------------------
+WRstr& WRstr::giveOwnership( char* buf, const unsigned int len )
+{
+	if ( !buf || !len )
+	{
+		clear();
+		return *this;
+	}
+
+	if ( m_str != m_smallbuf )
+	{
+		g_free( m_str );
+	}
+
+	if ( len < c_sizeofBaseString )
+	{
+		m_str = m_smallbuf;
+		memcpy( m_str, buf, len );
+		g_free( buf );
+		m_len = len;
+	}
+	else
+	{
+		m_str = buf;
+	}
+
+	m_len = len;
+	m_buflen = len;
+	m_str[m_len] = 0;
+	
+	return *this;
+}
+
+//-----------------------------------------------------------------------------
+WRstr& WRstr::trim()
+{
+	unsigned int start = 0;
+
+	// find start
+	for( ; start<m_len && isspace( (char)*(m_str + start) ) ; start++ );
+
+	// is the whole thing whitespace?
+	if ( start == m_len )
+	{
+		clear();
+		return *this;
+	}
+
+	// copy down the characters one at a time, noting the last
+	// non-whitespace character position, which will become the length
+	unsigned int pos = 0;
+	unsigned int marker = start;
+	for( ; start<m_len; start++,pos++ )
+	{
+		if ( !isspace((char)(m_str[pos] = m_str[start])) )
+		{
+			marker = pos;
+		}
+	}
+
+	m_len = marker + 1;
+	m_str[m_len] = 0;
+
+	return *this;
+}
+
+//-----------------------------------------------------------------------------
+WRstr& WRstr::alloc( const unsigned int characters, const bool preserveContents )
+{
+	if ( characters >= m_buflen ) // only need to alloc if more space is requested than we have
+	{
+		char* newStr = (char*)g_malloc( characters + 1 ); // create the space
+
+		if ( preserveContents ) 
+		{
+			memcpy( newStr, m_str, m_buflen ); // preserve whatever we had
+		}
+
+		if ( m_str != m_smallbuf )
+		{
+			g_free( m_str );
+		}
+
+		m_str = newStr;
+		m_buflen = characters;		
+	}
+
+	return *this;
+}
+
+//-----------------------------------------------------------------------------
+WRstr& WRstr::truncate( const unsigned int newLen )
+{
+	if ( newLen >= m_len )
+	{
+		return *this;
+	}
+
+	if ( newLen < c_sizeofBaseString )
+	{
+		if ( m_str != m_smallbuf )
+		{
+			m_buflen = c_sizeofBaseString;
+			memcpy( m_smallbuf, m_str, newLen );
+			g_free( m_str );
+			m_str = m_smallbuf;
+		}
+	}
+
+	m_str[ newLen ] = 0;
+	m_len = newLen;
+
+	return *this;
+}
+
+//-----------------------------------------------------------------------------
+WRstr& WRstr::shift( const unsigned int from )
+{
+	if ( from >= m_len )
+	{
+		return clear();
+	}
+
+	m_len -= from;
+	memmove( m_str, m_str + from, m_len + 1 );
+
+	return *this;
+}
+
+//------------------------------------------------------------------------------
+WRstr WRstr::substr( const unsigned int begin, const unsigned int len ) const
+{
+	WRstr ret;
+	if ( begin < m_len )
+	{
+		unsigned int amount = (begin + len) > m_len ? m_len - begin : len;
+		ret.set( m_str + begin, amount );
+	}
+	return ret;
+}
+
+//-----------------------------------------------------------------------------
+bool WRstr::isWildMatch( const char* pattern, const char* haystack )
+{
+	if ( !pattern )
+	{
+		return false;
+	}
+
+	if ( pattern[0] == 0 )
+	{
+		return haystack[0] == 0;
+	}
+
+	const char* after = 0;
+	const char* str = haystack;
+	char t;
+	char w;
+
+	for(;;)
+	{
+		t = *str;
+		w = *pattern;
+		if ( !t )
+		{
+			if ( !w )
+			{
+				return true; // "x" matches "x"
+			}
+			else if (w == '*')
+			{
+				++pattern;
+				continue; // "x*" matches "x" or "xy"
+			}
+
+			return false; // "x" doesn't match "xy"
+		}
+		else if ( t != w )
+		{
+			if (w == '*')
+			{
+				after = ++pattern;
+				continue; // "*y" matches "xy"
+			}
+			else if (after)
+			{
+				pattern = after;
+				w = *pattern;
+				if ( !w )
+				{
+					return true; // "*" matches "x"
+				}
+				else if (t == w)
+				{
+					++pattern;
+				}
+				++str;
+				continue; // "*sip*" matches "mississippi"
+			}
+			else
+			{
+				return false; // "x" doesn't match "y"
+			}
+		}
+
+		++str;
+		++pattern;
+	}
+}
+
+//-----------------------------------------------------------------------------
+bool WRstr::isWildMatchCase( const char* pattern, const char* haystack )
+{
+	if ( !pattern )
+	{
+		return false;
+	}
+
+	if ( pattern[0] == 0 )
+	{
+		return haystack[0] == 0;
+	}
+
+	const char* after = 0;
+	const char* str = haystack;
+	char t;
+	char w;
+
+	for(;;)
+	{
+		t = *str;
+		w = *pattern;
+		if ( !t )
+		{
+			if ( !w )
+			{
+				return true; // "x" matches "x"
+			}
+			else if (w == '*')
+			{
+				++pattern;
+				continue; // "x*" matches "x" or "xy"
+			}
+
+			return false; // "x" doesn't match "xy"
+		}
+		else if ( tolower(t) != tolower(w) )
+		{
+			if (w == '*')
+			{
+				after = ++pattern;
+				continue; // "*y" matches "xy"
+			}
+			else if (after)
+			{
+				pattern = after;
+				w = *pattern;
+				if ( !w )
+				{
+					return true; // "*" matches "x"
+				}
+				else if (t == w)
+				{
+					++pattern;
+				}
+				++str;
+				continue; // "*sip*" matches "mississippi"
+			}
+			else
+			{
+				return false; // "x" doesn't match "y"
+			}
+		}
+
+		++str;
+		++pattern;
+	}
+}
+
+//-----------------------------------------------------------------------------
+WRstr& WRstr::insert( const char* buf, const unsigned int len, const unsigned int startPos /*=0*/ )
+{
+	if ( len != 0 ) // insert 0? done
+	{
+		alloc( m_len + len + startPos, true ); // make sure there is enough room for the new string
+
+		if ( startPos < m_len ) // text after the insert, move everything up
+		{
+			memmove( m_str + len + startPos, m_str + startPos, m_len );
+		}
+
+		memcpy( m_str + startPos, buf, len );
+
+		m_len += len;
+		m_str[m_len] = 0;
+	}
+
+	return *this;
+}
+
+//-----------------------------------------------------------------------------
+WRstr& WRstr::append( const char c )
+{
+	if ( (m_len+1) >= m_buflen )
+	{
+		alloc( ((m_len * 3) / 2) + 1, true ); // single-character, expect a lot more are coming so alloc some buffer space
+	}
+	m_str[ m_len++ ] = c;
+	m_str[ m_len ] = 0;
+
+	return *this;
+}
+
+#ifdef STR_COPY_ARG
+
+//------------------------------------------------------------------------------
+WRstr& WRstr::appendFormatVA( const char* format, va_list arg )
+{
+	char buf[ c_formatBaseTrySize + 1 ]; // SOME space, malloc if we need a ton more
+
+	va_list vacopy;
+	va_copy( vacopy, arg ); // must be done BEFORE the vsnprintf() on some systems
+
+	int len = vsnprintf( buf, c_formatBaseTrySize, format, arg );
+
+	if ( len < c_formatBaseTrySize )
+	{
+		insert( buf, len, m_len );
+	}
+	else
+	{
+		char* alloc = (char*)g_malloc( ++len );
+
+		len = vsnprintf(alloc, len, format, arg);
+
+		if ( m_len )
+		{
+			insert( alloc, len, m_len );
+			g_free( alloc );
+		}
+		else
+		{
+			giveOwnership( alloc, len );
+		}
+	}
+
+	va_end( vacopy );
+
+	return *this;
+}
+
+#else
+
+//------------------------------------------------------------------------------
+WRstr& WRstr::format( const char* format, ... )
+{
+	va_list arg;
+	char buf[ c_formatBaseTrySize + 1 ]; // SOME space, malloc if we need a ton more
+
+	va_start( arg, format );
+	int len = vsnprintf( buf, c_formatBaseTrySize, format, arg );
+	va_end( arg );
+
+	if ( len < c_formatBaseTrySize+1 )
+	{
+		set( buf, len );
+	}
+	else
+	{
+		char* alloc = (char*)g_malloc(++len);
+
+		va_start( arg, format );
+		len = vsnprintf( alloc, len, format, arg );
+		va_end( arg );
+
+		giveOwnership( alloc, len );
+	}
+
+	return *this;
+}
+
+//-----------------------------------------------------------------------------
+WRstr& WRstr::appendFormat( const char* format, ... )
+{
+	va_list arg;
+	char buf[ c_formatBaseTrySize + 1 ]; // SOME space, malloc if we need a ton more
+
+	va_start( arg, format );
+	int len = vsnprintf( buf, c_formatBaseTrySize, format, arg );
+	va_end( arg );
+
+	if ( len < c_formatBaseTrySize+1 )
+	{
+		insert( buf, len, m_len );
+	}
+	else
+	{
+		char* alloc = (char*)g_malloc(++len);
+
+		va_start( arg, format );
+		len = vsnprintf( alloc, len, format, arg );
+		va_end( arg );
+
+		if ( m_len )
+		{
+			insert( alloc, len, m_len );
+			g_free( alloc );
+		}
+		else
+		{
+			giveOwnership( alloc, len );
+		}
+	}
+
+	return *this;
+}
+#endif
+
 
 #ifndef WRENCH_COMBINED
 #include "utils/utils.h"
-#include "vm/gc_object.h"
 #include "utils/serializer.h"
 #include "utils/simple_args.h"
 #include "vm/vm.h"
 #include "utils/opcode.h"
-#include "cc/str.h"
 #include "cc/opcode_stream.h"
 #include "debug/packet.h"
 #include "debug/debug.h"

@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2022 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -36,14 +36,13 @@ void wr_mboxRead( WRValue* stackTop, const int argn, WRContext* c )
 		WRValue* args = stackTop - argn;
 		int clear = (argn > 1) ? args[1].asInt() : 0;
 
-		WRValue* msg = c->w->globalRegistry.exists( args[0].getHash(), clear );
+		WRValue* msg = c->w->globalRegistry.exists( args[0].getHash(), clear != 0 );
 
 		if ( msg )
 		{
 			*stackTop = *msg;
 			return;
 		}
-
 	}
 }
 
@@ -57,11 +56,8 @@ void wr_mboxWrite( WRValue* stackTop, const int argn, WRContext* c )
 		WRValue* args = stackTop - argn;
 
 		WRValue* msg = c->w->globalRegistry.getAsRawValueHashTable( args[0].getHash() );
-		if ( msg != (void*)WRENCH_NULL_HASH )
-		{
-			msg->ui = args[1].getHash();
-			msg->p2 = INIT_AS_INT;
-		}
+		msg->ui = args[1].getHash();
+		msg->p2 = INIT_AS_INT;
 	}
 }
 

@@ -114,3 +114,72 @@ if ( a162 != -32001 ) { println("f8 " + a162 ); }
 if ( a32 != 500001 ) { println("f9 " + a32 ); }
 if ( a322 != -500001 ) { println("f10 " + a322); }
 
+// named enums: basic auto-increment
+enum Color { RED, GREEN, BLUE }
+
+if ( Color::RED != 0 )   { println("ne1"); }
+if ( Color::GREEN != 1 ) { println("ne2"); }
+if ( Color::BLUE != 2 )  { println("ne3"); }
+
+// named enum with explicit start value and continuation
+enum Direction { NORTH = 1, SOUTH, EAST, WEST }
+
+if ( Direction::NORTH != 1 ) { println("ne4"); }
+if ( Direction::SOUTH != 2 ) { println("ne5"); }
+if ( Direction::EAST != 3 )  { println("ne6"); }
+if ( Direction::WEST != 4 )  { println("ne7"); }
+
+// two namespaces with the same member name: no collision
+enum Fruit { RED = 10, GREEN = 20, BLUE = 30 }
+
+if ( Fruit::RED != 10 )   { println("ne8"); }
+if ( Fruit::GREEN != 20 ) { println("ne9"); }
+if ( Fruit::BLUE != 30 )  { println("nea"); }
+if ( Color::RED != 0 )    { println("neb"); }  // unchanged by Fruit
+if ( Color::GREEN != 1 )  { println("nec"); }
+
+// named enum with explicit values and gaps, including negative
+enum Status { IDLE = 0, RUNNING = 10, STOPPED = 20, ERR = -1 }
+
+if ( Status::IDLE != 0 )     { println("ned"); }
+if ( Status::RUNNING != 10 ) { println("nee"); }
+if ( Status::STOPPED != 20 ) { println("nef"); }
+if ( Status::ERR != -1 )     { println("neg"); }
+
+// named enum with float values
+enum Tolerance { TIGHT = 0.001, LOOSE = 0.1, NONE = 1.0 }
+
+if ( Tolerance::TIGHT != 0.001 ) { println("neh"); }
+if ( Tolerance::LOOSE != 0.1 )   { println("nei"); }
+if ( Tolerance::NONE != 1.0 )    { println("nej"); }
+
+// named enum used in expressions
+if ( Color::RED + Color::BLUE != 2 )         { println("nek"); }
+if ( Direction::SOUTH * Direction::NORTH != 2 ) { println("nel"); }
+
+// named enum in switch/case
+var s = Color::GREEN;
+switch( s )
+{
+    case Color::RED:  { println("nem"); break; }
+    case Color::GREEN: { break; }
+    case Color::BLUE: { println("neo"); break; }
+}
+
+// named enum accessed from inside a function
+function testNamedEnum()
+{
+    if ( Color::RED != 0 )       { println("nep"); }
+    if ( Direction::WEST != 4 )  { println("neq"); }
+    if ( Status::ERR != -1 )     { println("ner"); }
+
+    // named enum declared inside a function (local scope)
+    enum FuncLocal { AA = 100, BB = 200, CC }
+
+    if ( FuncLocal::AA != 100 ) { println("nes"); }
+    if ( FuncLocal::BB != 200 ) { println("net"); }
+    if ( FuncLocal::CC != 201 ) { println("neu"); }
+}
+
+testNamedEnum();
+

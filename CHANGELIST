@@ -1,3 +1,90 @@
+7.2.2 ----------------------------------------------------------------------------------
+- adding ternary expressions
+- adding some more tests, fixing existing ones
+- fixed all tests to require 'var'
+- fixed non-compact string concatenation with float values
+- fixed array growth, insertion, and removal handling for allocation failures and invalid indexes
+- reduced compiler expression memory use and fixed WRarray copy/removal edge cases
+- fixed overwrite-store optimization removing assignments still read by the next expression
+- fixed empty strings and arrays reporting malloc failure with allocators that reject zero-byte requests
+
+7.2.1 ----------------------------------------------------------------------------------
+- added the blank keyword as a declaration modifier: blank X;, blank var X; and var blank X; are accepted
+- blank declarations now produce WR_ERR_blank_variables_cannot_be_initialized if they use = or compound assignment in the declaration statement
+- added parser coverage for blank declarations and a regression test for the compile-time initializer error
+- added a regression proving a host can pre-seed a bare global through wr_newContext() and wr_getGlobalRef() before first execution
+- added a small helper fixture in tests/024_numbers.c for that host-side global pre-seed test
+- fixed wr_getGlobalRef() so short unqualified global names like "N" and "AB" resolve correctly
+- added regression coverage for short global-name lookup through wr_getGlobalRef()
+- fixed wr_import() error cleanup destroying the caller context instead of the failed import context
+- widened WRState::err to uint8_t so the full 0-255 error range is preserved
+
+7.0.2 ----------------------------------------------------------------------------------
+- fixes around yield
+- expanding some uint8 values that were a little too conservative
+- fixed some very corner-y case code and added some more audits and protection
+
+7.0.1 ----------------------------------------------------------------------------------
+- adding a global context in the form of a void* in WRState, so all functions can
+  have access (c->w->ctx) to any data the calling program wants to make available
+
+  void wr_setStateContext( WRState* w, void* ctx );
+  void* wr_getStateContext( WRState* w );
+
+- moved the context (and a few supporting objects) into wrench.h so they can be used
+  in library functions etc
+- using string object for error messages
+- adding ASan UBSan and perf to Valgrind for validation and strict code cleanliness tools
+- added more test code to thrash it harder
+- added 
+
+	void* ctxLocal; // user value assigned with this context, opaque to wrench
+
+  so each context could set a callback-inspectable value
+- using function names as arguments results in wrench substituting the hash value
+  of the function's name. This is so wrench can externalize functions for callback
+  I TRIED to make this work:
+
+  var a = funcname; // assign the function to a variable
+  a(23);            // call the variable
+
+  and I made it work but wow was it a MESS. Technically worked but blew the codebase up
+  and was S L O W because of all the special cases it had to check at runtime. I have 
+  reserved an opcode for this if I ever figure out a way to make this happen.
+
+7.0.0 ----------------------------------------------------------------------------------
+- major release adding new opcodes:
+ O_LocalBZ
+ O_LocalBZ8
+ O_GlobalBZ
+ O_GlobalBZ8
+- fixed minor task scheduling bug
+- allowed 32-bit garbage collector hint, 16 bit was just a wee bit small
+- added a disassembler, embedded in wrench so:
+
+6.0.21 ---------------------------------------------------------------------------------
+- fixed cross-module stack error (thanks to Tom Whiston)
+- added his test to the testing suite
+- ran code through ASAN and some other related tools to find any problems, some minor
+  corner-cases uncovered.
+- did a code pass to fix typos
+- inlined the function-as-name call to wr_callFunction
+- added the ability to call LIBRARY functions through the regular wr_callFunction() interface
+
+6.0.20 ---------------------------------------------------------------------------------
+- fixed off-by-one in a hash delete
+- added more clarity to creating/installing values
+- clarified and added:
+    void setString( WRContext* context, const char* data, const int len =0 );
+    void setFloat( const float f );
+    void setInt( const int i );
+- fixed possible garbage-collection null check
+- fixed some cut/paste optimizer bugs, very obscure
+- fixed some 8-bit boundary checking
+- enums overflowing after -1 used fixed
+- potential EOF bugs fixed
+- fixed win32 warnings
+
 6.0.19 ---------------------------------------------------------------------------------
 - added library support for FastLED, very very basic support just as a demonstration
   #define WR_FASTLED_DATA_PIN 6  // define your data pin here

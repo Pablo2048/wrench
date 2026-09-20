@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2022 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -39,7 +39,7 @@ class WRValueSerializer
 public:
 	
 	WRValueSerializer() : m_pos(0), m_size(0), m_buf(0) {}
-	WRValueSerializer( const char* data, const int size ) : m_pos(0), m_size(size)
+	WRValueSerializer( const char* data, const unsigned int size ) : m_pos(0), m_size(size)
 	{
 		m_buf = (char*)g_malloc(size);
 #ifdef WRENCH_HANDLE_MALLOC_FAIL
@@ -51,7 +51,10 @@ public:
 		else
 #endif
 		{
-			memcpy( m_buf, data, size );
+			if ( size > 0 )
+			{
+				memcpy( m_buf, data, size );
+			}
 		}
 	}
 	
@@ -69,6 +72,11 @@ public:
 
 	bool read( char* data, const int size )
 	{
+		if ( size <= 0 )
+		{
+			return true;
+		}
+
 		if ( m_pos + size > m_size )
 		{
 			return false;
@@ -81,11 +89,26 @@ public:
 
 	void write( const char* data, const int size )
 	{
+		if ( size <= 0 )
+		{
+			return;
+		}
+
 		if ( m_pos + size >= m_size )
 		{
 			m_size += (size*2) + 8;
 			char* newBuf = (char*)g_malloc( m_size );
-			memcpy( newBuf, m_buf, m_pos );
+#ifdef WRENCH_HANDLE_MALLOC_FAIL
+			if ( !newBuf )
+			{
+				g_mallocFailed = true;
+				return;
+			}
+#endif
+			if ( m_pos > 0 )
+			{
+				memcpy( newBuf, m_buf, m_pos );
+			}
 			g_free( m_buf );
 			m_buf = newBuf;
 		}
@@ -96,10 +119,9 @@ public:
 
 private:
 
-	int m_pos;
-	int m_size;
+	unsigned int m_pos;
+	unsigned int m_size;
 	char* m_buf;
 };
 
 #endif
-

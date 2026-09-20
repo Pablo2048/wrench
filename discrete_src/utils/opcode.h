@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2022 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -326,7 +326,12 @@ enum WROpcode
 	O_InitVar,
 
 	O_DebugInfo,
-				
+
+	O_LocalBZ,
+	O_LocalBZ8,
+	O_GlobalBZ,
+	O_GlobalBZ8,
+
 	// non-interpreted opcodes
 	O_HASH_PLACEHOLDER,
 	O_FUNCTION_CALL_PLACEHOLDER,

@@ -1,5 +1,5 @@
 /*******************************************************************************
-Copyright (c) 2022 Curt Hartung -- curt.hartung@gmail.com
+Copyright (c) 2026 Curt Hartung -- curt.hartung@gmail.com
 
 MIT Licence
 
@@ -61,10 +61,15 @@ public:
 	WROpcodeStream& operator += ( const unsigned char data ) { return append(&data, 1); }
 	WROpcodeStream& append( const unsigned char* data, const int size )
 	{
+		if ( size <= 0 )
+		{
+			return *this;
+		}
+
 		if ( (size + m_len) >= m_bufLen )
 		{
 			unsigned char* buf = m_buf;
-			m_bufLen = size + m_len + 16;
+			m_bufLen = size + m_len + (m_bufLen * 3)/2;
 			m_buf = (unsigned char *)g_malloc( m_bufLen );
 			if ( m_len )
 			{

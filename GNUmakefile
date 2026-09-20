@@ -75,6 +75,9 @@ clean:
 valgrind: $(OBJS) discrete_src/utils/wrench_cli.cpp discrete_src/debug/debugger.cpp
 	g++ -o wrench_v $(FLAGS) -Wall -Werror -I. -iquote discrete_src -O3 -ggdb $(OBJS) discrete_src/utils/wrench_cli.cpp discrete_src/debug/debugger.cpp
 
+tests: test
+tested: test
+
 test: $(OBJS) discrete_src/utils/wrench_cli.cpp discrete_src/debug/debugger.cpp
 	g++ $(OBJS) -Wall -Werror $(FLAGS) -iquote discrete_src -Isrc -I. discrete_src/utils/test_wrench_cross_module_globals.cpp -std=c++11 -DDOCTEST_CONFIG_IMPLEMENT_WITH_MAIN -o test_wrench_cross_module_globals
 	g++ $(OBJS) -Wall -Werror discrete_src/debug/debugger.cpp discrete_src/utils/wrench_cli.cpp $(FLAGS) -iquote discrete_src -Isrc -DWRENCH_ENABLE_CROSS_MODULE_EXTERNAL_TEST -o wrench_dev
